@@ -1,0 +1,9 @@
+pyyaml>=6.0
+pandas>=2.0
+pyarrow>=10.0
+sqlalchemy>=1.4
+pytest>=7.0
+python-dotenv>=1.0
+numpy>=1.24
+websockets>=11.0
+pytest-asyncio>=0.21

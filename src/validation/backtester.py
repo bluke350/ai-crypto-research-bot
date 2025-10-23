@@ -4,7 +4,7 @@ from typing import Dict, Any
 from src.execution.order_models import Order
 
 
-def run_backtest(prices: pd.DataFrame, targets: pd.Series, simulator, initial_cash: float = 1_000_000.0) -> Dict[str, Any]:
+def run_backtest(prices: pd.DataFrame, targets: pd.Series, simulator, initial_cash: float = 1_000_000.0, sizing_mode: str = "units") -> Dict[str, Any]:
     """Run a simple backtest that executes market orders to reach target position units.
 
     Parameters
@@ -29,6 +29,10 @@ def run_backtest(prices: pd.DataFrame, targets: pd.Series, simulator, initial_ca
     if len(prices) != len(targets):
         raise ValueError("prices and targets must align and have same length")
 
+    # Ensure prices are positive
+    if (prices["close"] <= 0).any():
+        raise ValueError("prices must be positive")
+
     cash = float(initial_cash)
     position = 0.0
     pnl = []
@@ -39,14 +43,31 @@ def run_backtest(prices: pd.DataFrame, targets: pd.Series, simulator, initial_ca
         target = float(targets.iat[idx])
         delta = target - position
         if abs(delta) > 1e-12:
-            side = "buy" if delta > 0 else "sell"
-            ord_obj = Order(order_id=f"o{idx}", pair="XBT/USD", side=side, size=delta, price=None)
+            # Determine order size based on sizing_mode
+            if sizing_mode == "units":
+                order_size = delta
+            elif sizing_mode == "notional":
+                # interpret targets as desired notional exposure; convert to units
+                # avoid division by zero
+                order_size = delta / price if price != 0 else 0.0
+            else:
+                raise ValueError("unsupported sizing_mode")
+
+            side = "buy" if order_size > 0 else "sell"
+            ord_obj = Order(order_id=f"o{idx}", pair="XBT/USD", side=side, size=order_size, price=None)
             fill = simulator.place_order(ord_obj, market_price=price, is_maker=False)
             fee = fill.get("fee", 0.0)
-            # update cash and position
-            cash -= (fill.get("avg_fill_price", price) * delta) + fee
-            position += delta
+            filled = float(fill.get("filled_size", order_size))
+            avg_price = float(fill.get("avg_fill_price", price))
+            # update cash and position using filled size
+            cash -= (avg_price * filled) + fee
+            position += filled
             exec_row = dict(fill)
+            # include requested order metadata so callers/tests can inspect original size/notional
+            exec_row["requested_size"] = order_size
+            exec_row["requested_notional"] = abs(price * order_size)
+            exec_row["side"] = side
+            exec_row["is_maker"] = False
             exec_row["timestamp"] = row["timestamp"]
             exec_rows.append(exec_row)
 

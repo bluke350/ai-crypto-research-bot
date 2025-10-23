@@ -1,0 +1,6 @@
+project:
+  name: ai-crypto-research-bot
+  seed: 42
+  experiment_db: experiments/registry.db
+  artifacts_dir: experiments/artifacts
+  reports_dir: orchestration/reports

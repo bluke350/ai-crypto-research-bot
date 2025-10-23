@@ -1,0 +1,12 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    { "label": "Snapshot OHLC (Kraken)", "type": "shell", "command": "python -m orchestration.pipelines.ingest_pipeline --provider kraken --symbols XBT/USD ETH/USD --interval 1m" },
+    { "label": "Build features", "type": "shell", "command": "python -m orchestration.pipelines.feature_pipeline --config configs/features.yaml" },
+    { "label": "Train ML", "type": "shell", "command": "python -m orchestration.pipelines.training_pipeline --model ml" },
+    { "label": "Train RL", "type": "shell", "command": "python -m orchestration.pipelines.training_pipeline --model rl" },
+    { "label": "Tune", "type": "shell", "command": "python -m orchestration.pipelines.tuning_pipeline --config configs/tuning.yaml" },
+    { "label": "Backtest (Kraken sim)", "type": "shell", "command": "python -m orchestration.pipelines.backtest_pipeline --exchange kraken" },
+    { "label": "Walk-forward", "type": "shell", "command": "python -m orchestration.pipelines.walk_forward_pipeline --exchange kraken" }
+  ]
+}

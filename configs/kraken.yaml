@@ -1,0 +1,23 @@
+kraken:
+  network: "production"
+  base_url: "https://api.kraken.com"
+  ws_url: "wss://ws.kraken.com"
+  symbols: ["XBT/USD", "ETH/USD"]
+  bar_interval: "1m"
+  rate_limits:
+    rest_per_minute: 60
+    ws_subscriptions_max: 100
+  fees:
+    taker_bps: 26
+    maker_bps: 16
+  trading_rules:
+    min_order_size:
+      XBT/USD: 0.0001
+      ETH/USD: 0.001
+    price_tick:
+      XBT/USD: 0.5
+      ETH/USD: 0.05
+  timezone: "UTC"
+  retries:
+    max_attempts: 5
+    backoff_ms: [200, 400, 800, 1600, 3200]

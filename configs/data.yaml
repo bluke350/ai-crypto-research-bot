@@ -1,0 +1,11 @@
+data:
+  symbols: ["BTC-USDT"]
+  bar_interval: "1m"
+  start: "2021-01-01"
+  end: "2021-12-31"
+  provider: "paper_exchange"
+  timezone: "UTC"
+  snapshot_partition: "date"
+  quality_checks:
+    min_bars: 1000
+    allow_gaps: false
