@@ -1,3 +1,4 @@
+
 pyyaml>=6.0
 pandas>=2.0
 pyarrow>=10.0
@@ -7,3 +8,8 @@ python-dotenv>=1.0
 numpy>=1.24
 websockets>=11.0
 pytest-asyncio>=0.21
+requests>=2.31
+prometheus_client>=0.18
+torch>=2.0.0
+pytest-cov>=4.0
+coverage>=7.0
