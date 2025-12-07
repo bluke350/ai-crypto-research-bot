@@ -20,3 +20,4 @@ streamlit>=1.26.0
 altair>=5.0
 streamlit-autorefresh>=0.0.3
 boto3>=1.26
+river>=0.16.0
