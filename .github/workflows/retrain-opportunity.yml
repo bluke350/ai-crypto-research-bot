@@ -1,0 +1,52 @@
+name: Retrain Opportunity Model
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'  # every Sunday at 03:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set S3 bucket env
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: |
+          echo "S3_BUCKET set: ${S3_BUCKET:-<not-set>}"
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install scikit-learn
+      - name: Run retrain
+        run: |
+          mkdir -p models
+          python tooling/train_opportunity.py --prices-csv data/manual_prices_from_parquet/manual_prices_from_parquet.csv --window 20 --output models/opportunity.pkl || true
+      - name: Upload model artifact to GitHub Actions (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: opportunity-model
+          path: models/opportunity.pkl
+
+      - name: Upload model to S3
+        if: secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '' && env.S3_BUCKET != ''
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Copy model to S3
+        if: secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '' && env.S3_BUCKET != ''
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_KEY: ${{ secrets.S3_KEY || 'models/opportunity.pkl' }}
+        run: |
+          echo "Uploading models/opportunity.pkl -> s3://${S3_BUCKET}/${S3_KEY}"
+          aws s3 cp models/opportunity.pkl s3://${S3_BUCKET}/${S3_KEY} --acl private
