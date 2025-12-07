@@ -24,27 +24,69 @@ jobs:
         run: |
           PYTHONPATH=. python tooling/canary_promote.py > canary_out.json || true
           cat canary_out.json
-      - name: Parse metrics and promote to prod S3 key
+      - name: Parse metrics and promote to prod S3 key (with thresholds)
         if: env.S3_BUCKET != ''
         env:
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
           S3_KEY_PROD: ${{ secrets.S3_KEY_PROD || 'models/opportunity-prod.pkl' }}
-        run: |
-          # read pnl metric if present, else skip
-          if [ -f canary_out.json ]; then
-            PNL=$(jq -r '.pnl // "null"' canary_out.json)
-            echo "PNL: $PNL"
-            # simple threshold: if pnl > 0 then promote
-            if [ "$PNL" != "null" ] && (( $(echo "$PNL > 0" | bc -l) )); then
-              echo "Promoting model to prod S3 key"
-              aws s3 cp models/opportunity-latest.pkl s3://${S3_BUCKET}/${S3_KEY_PROD} --acl private
-            else
-              echo "No promotion: pnl is null or not positive"
-            fi
-          else
-            echo "No canary output found"
-          fi
-        env:
+          MIN_PNL: ${{ secrets.CANARY_MIN_PNL || '0.0' }}
+          MIN_SHARPE: ${{ secrets.CANARY_MIN_SHARPE || '0.5' }}
+          MAX_DD: ${{ secrets.CANARY_MAX_DD || '0.25' }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          if [ ! -f canary_out.json ]; then
+            echo "No canary output found; skipping promotion"
+            exit 0
+          fi
+          TOTAL_PNL=$(jq -r '.total_pnl // .pnl // "null"' canary_out.json)
+          SHARPE=$(jq -r '.sharpe // "null"' canary_out.json)
+          MAX_DD=$(jq -r '.max_drawdown // "null"' canary_out.json)
+          echo "Metrics: total_pnl=${TOTAL_PNL}, sharpe=${SHARPE}, max_dd=${MAX_DD}"
+          # Defaults from secrets
+          MIN_PNL=${MIN_PNL}
+          MIN_SHARPE=${MIN_SHARPE}
+          MAX_DD_THRESH=${MAX_DD}
+
+          promote=true
+          if [ "$TOTAL_PNL" = "null" ]; then
+            echo "No PnL found in metrics -> cannot promote"
+            promote=false
+          else
+            # compare numeric
+            if (( $(echo "$TOTAL_PNL < $MIN_PNL" | bc -l) )); then
+              echo "Total PnL $TOTAL_PNL < $MIN_PNL -> not promoting"
+              promote=false
+            fi
+          fi
+          if [ "$SHARPE" = "null" ]; then
+            echo "Sharpe missing -> not promoting"
+            promote=false
+          else
+            if (( $(echo "$SHARPE < $MIN_SHARPE" | bc -l) )); then
+              echo "Sharpe $SHARPE < $MIN_SHARPE -> not promoting"
+              promote=false
+            fi
+          fi
+          if [ "$MAX_DD" != "null" ]; then
+            if (( $(echo "$(echo $MAX_DD | sed 's/-//g') > $MAX_DD_THRESH" | bc -l) )); then
+              echo "Max drawdown $MAX_DD exceeds threshold $MAX_DD_THRESH -> not promoting"
+              promote=false
+            fi
+          fi
+
+          if [ "$promote" = true ]; then
+            echo "Promoting model to prod S3 key"
+            # create backup of existing prod model (if exists)
+            BACKUP_KEY="models/opportunity-prod-backup-$(date -u +%Y%m%dT%H%M%SZ).pkl"
+            if aws s3 ls s3://${S3_BUCKET}/${S3_KEY_PROD} > /dev/null 2>&1; then
+              echo "Backing up existing prod model to ${BACKUP_KEY}"
+              aws s3 cp s3://${S3_BUCKET}/${S3_KEY_PROD} s3://${S3_BUCKET}/${BACKUP_KEY} --acl private
+            fi
+            aws s3 cp models/opportunity-latest.pkl s3://${S3_BUCKET}/${S3_KEY_PROD} --acl private
+            echo "Invoking canary rollout monitor"
+            python tooling/canary_rollout.py --min-pnl ${MIN_PNL} --min-sharpe ${MIN_SHARPE} --max-dd ${MAX_DD_THRESH} --wait 10
+          else
+            echo "No promotion performed"
+          fi

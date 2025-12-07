@@ -47,26 +47,47 @@ def shadow_eval(model, df: pd.DataFrame):
     X = df.select_dtypes(include=[float, int]).drop(columns=['label', 'return'], errors='ignore')
     y = df.get('label')
     metrics = {}
-    if 'return' in df.columns:
-        # simple simulated PnL: take sign(pred - 0.5) * return and report mean
-        if hasattr(model, 'predict_proba'):
-            p = model.predict_proba(X)[:, 1]
-        else:
-            p = model.predict(X)
-        p = np.asarray(p).ravel()
-        preds_sign = np.sign(p - 0.5)
-        pnl = (preds_sign * df['return'].values).mean()
-        metrics['pnl'] = float(pnl)
 
+    # probabilities or predictions
     if hasattr(model, 'predict_proba'):
         p = model.predict_proba(X)[:, 1]
         p = np.clip(p, 1e-6, 1 - 1e-6)
-        loss = -np.mean(y * np.log(p) + (1 - y) * np.log(1 - p))
-        metrics['logloss'] = float(loss)
+        try:
+            loss = -np.mean(y * np.log(p) + (1 - y) * np.log(1 - p))
+            metrics['logloss'] = float(loss)
+        except Exception:
+            metrics['logloss'] = None
+        preds = (p > 0.5).astype(int)
     else:
         preds = model.predict(X)
-        acc = float((preds == y).mean())
-        metrics['1-acc'] = 1.0 - acc
+        metrics['1-acc'] = 1.0 - float((preds == y).mean())
+
+    # Backtest-based metrics when returns available
+    if 'return' in df.columns:
+        # returns array
+        ret = df['return'].fillna(0).to_numpy()
+        # positions: +1 for predict==1, -1 for predict==0
+        pos = np.where(np.asarray(preds) == 1, 1.0, -1.0)
+        strat = pos * ret
+        cum = np.cumsum(strat)
+        total_pnl = float(cum[-1])
+        mean = float(np.nanmean(strat))
+        std = float(np.nanstd(strat))
+        sharpe = None
+        if std and std > 0:
+            sharpe = float(mean / std * np.sqrt(252))
+        # max drawdown
+        peak = np.maximum.accumulate(cum)
+        drawdowns = (cum - peak) / (peak + 1e-12)
+        max_dd = float(drawdowns.min())
+        win_rate = float((strat > 0).mean())
+
+        metrics.update({
+            'total_pnl': total_pnl,
+            'sharpe': sharpe,
+            'max_drawdown': max_dd,
+            'win_rate': win_rate,
+        })
 
     return metrics
 
