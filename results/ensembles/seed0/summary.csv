@@ -1,0 +1,4 @@
+ckpt,train_seed,ens,avg_csv,final_return,max_drawdown
+models/ppo_scale5_5k_seed0.pth,100,5,results/ensembles/seed0\ppo_scale5_5k_seed0_seed100_ens5_avg.csv,1.729963219884545,-1.9679704721836013
+models/ppo_scale5_5k_seed0.pth,100,10,results/ensembles/seed0\ppo_scale5_5k_seed0_seed100_ens10_avg.csv,0.03602405604192782,-2.808097793838548
+models/ppo_scale5_5k_seed0.pth,100,20,results/ensembles/seed0\ppo_scale5_5k_seed0_seed100_ens20_avg.csv,0.4900017648418187,-2.2635194218960977

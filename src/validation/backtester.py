@@ -4,7 +4,7 @@ from typing import Dict, Any
 from src.execution.order_models import Order
 
 
-def run_backtest(prices: pd.DataFrame, targets: pd.Series, simulator, initial_cash: float = 1_000_000.0, sizing_mode: str = "units") -> Dict[str, Any]:
+def run_backtest(prices: pd.DataFrame, targets: pd.Series, simulator=None, *, executor=None, initial_cash: float = 1_000_000.0, sizing_mode: str = "units") -> Dict[str, Any]:
     """Run a simple backtest that executes market orders to reach target position units.
 
     Parameters
@@ -55,7 +55,13 @@ def run_backtest(prices: pd.DataFrame, targets: pd.Series, simulator, initial_ca
 
             side = "buy" if order_size > 0 else "sell"
             ord_obj = Order(order_id=f"o{idx}", pair="XBT/USD", side=side, size=order_size, price=None)
-            fill = simulator.place_order(ord_obj, market_price=price, is_maker=False)
+            # prefer executor if provided (OrderExecutor interface), otherwise fall back to simulator
+            if executor is not None:
+                fill = executor.execute(ord_obj, market_price=price, is_maker=False)
+            elif simulator is not None:
+                fill = simulator.place_order(ord_obj, market_price=price, is_maker=False)
+            else:
+                raise ValueError("Either 'simulator' or 'executor' must be provided to run_backtest")
             fee = fill.get("fee", 0.0)
             filled = float(fill.get("filled_size", order_size))
             avg_price = float(fill.get("avg_fill_price", price))

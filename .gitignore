@@ -1,4 +1,6 @@
 __pycache__/
 .venv/
 experiments/
+# Local secrets
+.env
 *.pyc

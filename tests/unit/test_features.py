@@ -4,7 +4,7 @@ from src.features import technical, targets
 
 
 def make_sample(n=100):
-    rng = pd.date_range("2021-01-01", periods=n, freq="T", tz="UTC")
+    rng = pd.date_range("2021-01-01", periods=n, freq="min", tz="UTC")
     price = np.cumsum(np.random.randn(n)) + 100.0
     df = pd.DataFrame({
         "timestamp": rng,

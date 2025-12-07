@@ -1,3 +1,4 @@
+import os
 import time
 from threading import Lock
 
@@ -15,6 +16,10 @@ class RateLimiter:
         self.lock = Lock()
 
     def sleep_if_needed(self):
+        # allow tests or CI to opt-out of sleeping by setting SKIP_RATE_LIMIT=1
+        if os.environ.get("SKIP_RATE_LIMIT") in ("1", "true", "True"):
+            return
+
         with self.lock:
             now = time.time()
             self.timestamps = [t for t in self.timestamps if now - t < self.window]

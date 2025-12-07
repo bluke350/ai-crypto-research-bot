@@ -1,3 +1,33 @@
+from typing import Dict, Any
+import uuid
+import os
+import pandas as pd
+from src.execution.simulator import Simulator
+
+
+class PaperBroker:
+    def __init__(self, run_id: str = None, simulator: Simulator = None, out_dir: str = "experiments/runs"):
+        self.sim = simulator or Simulator()
+        self.run_id = run_id or str(uuid.uuid4())
+        self.out_dir = os.path.join(out_dir, self.run_id)
+        os.makedirs(self.out_dir, exist_ok=True)
+        self.exec_log = []
+
+    def place_order(self, order: Any, market_price: float = None) -> Dict[str, Any]:
+        fill = self.sim.place_order(order, market_price=market_price)
+        rec = dict(fill)
+        rec["order_id"] = order.order_id
+        self.exec_log.append(rec)
+        pd.DataFrame(self.exec_log).to_parquet(os.path.join(self.out_dir, "exec_log.parquet"), index=False)
+        return fill
+
+    def cancel_order(self, order_id: str) -> bool:
+        return self.sim.cancel_order(order_id)
+
+    def get_exec_log(self) -> pd.DataFrame:
+        if self.exec_log:
+            return pd.DataFrame(self.exec_log)
+        return pd.DataFrame()
 import os
 import pandas as pd
 from typing import Dict, Any

@@ -6,7 +6,7 @@ from tests.unit.test_backtester import make_simulator
 
 
 def make_price_series(n=5, start_price=100.0):
-    times = pd.date_range("2020-01-01", periods=n, freq="H")
+    times = pd.date_range("2020-01-01", periods=n, freq="h")
     prices = pd.DataFrame({"timestamp": times, "close": [start_price + i for i in range(n)]})
     return prices
 

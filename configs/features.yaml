@@ -1,0 +1,45 @@
+features:
+  microstructure:
+    enabled: true
+    top_n: 5
+    imbalance_window: 5
+    depth_price_bands: 3
+
+  volume_profile:
+    enabled: true
+    bucket_size: 100
+    vpin_window: 50
+
+  multitimeframe:
+    enabled: true
+    rules:
+      - name: "1m"
+        rule: "1T"
+        agg: "ohlcv"
+      - name: "5m"
+        rule: "5T"
+        agg: "ohlcv"
+
+  lagged_contagion:
+    enabled: false
+    max_lag: 10
+
+  feature_fusion:
+    method: "concat"
+    normalize: true
+
+  selection:
+    volatility_window: 100
+    liquidity_window: 50
+features:
+  microstructure:
+    enabled: true
+    top_n: 5
+    weighted_depth_n: 10
+    bands: [0.0, 0.001, 0.005, 0.01]
+  cross_asset:
+    enabled: false
+  volume_profile:
+    enabled: false
+  multitimeframe:
+    enabled: false

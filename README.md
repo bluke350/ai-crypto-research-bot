@@ -44,3 +44,72 @@ Prevent losing chats:
 - Keep a dedicated workspace file (`.code-workspace`) and open that instead of the raw folder to preserve workspace-scoped extension state.
 - If your extension supports pinning or saving conversations, use it.
 
+## Logging and runtime tips
+
+The project includes a sample `logging.conf` in the repo root. To enable structured logging for local runs:
+
+PowerShell:
+
+```powershell
+setx LOG_CFG logging.conf
+.\.venv\Scripts\python -m your_module
+```
+
+Or configure logging programmatically in your application entrypoint by loading `logging.conf` via `logging.config.fileConfig`.
+
+Operational notes:
+- The WS client writes per-minute parquet files to `data/raw/{PAIR}/{YYYYMMDD}/{YYYYMMDDTHHMM}.parquet`.
+- Checkpoints are persisted to `data/raw/_ws_checkpoints.json` to allow resuming after restarts.
+- For production, run the consumer under a process manager and ensure the log file or central logging sink is configured.
+
+## Pipelines and tuning
+
+- The tuning pipeline supports three optimizers: `bayes` (default), `random`, and `optuna`.
+- When using `optuna`, you can pass `--optuna-db sqlite:///path/to/db` to persist the Optuna study (useful for parallel or long-running studies), and `--optuna-pruner` to select a pruner (`median` or `asha`).
+- The `auto_train_pipeline` also supports using `optuna` and will accept the same `--optuna-db` and `--optuna-pruner` flags.
+
+## Ensemble mapping (training pipeline)
+
+`training_pipeline` supports an explicit mapping option for ensembles. Use `--ensemble-names` to list model names (comma-separated) and `--ensemble-map` to map names to checkpoint files.
+
+Example:
+
+```bash
+python -m orchestration.pipelines.training_pipeline \
+  --model ml \
+  --out experiments/artifacts \
+  --ensemble-names modelA,modelB \
+  --ensemble-map modelB=/path/to/modelB_ckpt.pth
+```
+
+Behavior:
+- If `--ensemble-map` provides `name=path` pairs, those files are copied into the run's `checkpoints/` directory and referenced in the saved `ensemble_weights.json`.
+- For names without explicit mappings the pipeline attempts to match produced artifacts by substring, then by regex (if the name looks like a pattern), then by fuzzy matching. As a final fallback it will map artifacts by index when counts align.
+
+
+## Scheduler & Background helpers
+
+- `tooling/install_task.ps1`: create, list, enable/disable, or delete Windows Scheduled Tasks that run the controller or tuning pipelines. Use `-UseWrapper` and `-WorkingDirectory` to avoid quoting issues when running from Task Scheduler.
+- `tooling/run_controller.ps1`: start/stop/status helper that launches the controller as a detached process, records a PID to `experiments/controller.pid`, and supports log rotation, a custom Python path (`-PythonPath`), and automatic wrapper generation (`-UseWrapper`).
+
+- `tooling/install_nssm.ps1`: helper to register `run_controller` as a Windows service using NSSM (Non-Sucking Service Manager). Requires `nssm.exe` to be available on PATH or in `C:\nssm\`.
+
+
+Recommended quick examples (PowerShell):
+
+Create a safe periodic task (runs controller in `--once` mode every 5 minutes):
+
+```powershell
+.\tooling\install_task.ps1 -Create -TaskName "ai-crypto-controller" -Schedule Minute -Modifier 5 `
+  -Action '"C:\workspace\ai-crypto-research-bot\.venv\Scripts\python.exe" -m scripts.continuous_controller --once --prices-csv C:\workspace\ai-crypto-research-bot\examples\sample_prices_for_cli.csv --n-trials 5 --artifacts-root C:\workspace\ai-crypto-research-bot\experiments\artifacts' `
+  -WorkingDirectory C:\workspace\ai-crypto-research-bot -UseWrapper -Highest -Force
+```
+
+Start the controller as a background process (with wrapper and log rotation):
+
+```powershell
+.\tooling\run_controller.ps1 -Action Start -PricesCsv examples\sample_prices_for_cli.csv -Parallel 2 -LogDir experiments\logs `
+  -PythonPath .\.venv\Scripts\python.exe -MaxLogSizeMB 20 -MaxRotatedFiles 7 -UseWrapper -WorkingDirectory C:\workspace\ai-crypto-research-bot
+```
+
+

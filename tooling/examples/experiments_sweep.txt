@@ -1,0 +1,8 @@
+python -m src.models.rl.train_ppo --steps 200 --save models/ppo_s0_scale1.0_obsraw.pth --seed 0 --action-scale 1.0 --obs-mode raw --verbose
+python -m src.models.rl.train_ppo --steps 200 --save models/ppo_s0_scale1.0_obsreturns.pth --seed 0 --action-scale 1.0 --obs-mode returns --verbose
+python -m src.models.rl.train_ppo --steps 200 --save models/ppo_s0_scale5.0_obsraw.pth --seed 0 --action-scale 5.0 --obs-mode raw --verbose
+python -m src.models.rl.train_ppo --steps 200 --save models/ppo_s0_scale5.0_obsreturns.pth --seed 0 --action-scale 5.0 --obs-mode returns --verbose
+python -m src.models.rl.train_ppo --steps 200 --save models/ppo_s1_scale1.0_obsraw.pth --seed 1 --action-scale 1.0 --obs-mode raw --verbose
+python -m src.models.rl.train_ppo --steps 200 --save models/ppo_s1_scale1.0_obsreturns.pth --seed 1 --action-scale 1.0 --obs-mode returns --verbose
+python -m src.models.rl.train_ppo --steps 200 --save models/ppo_s1_scale5.0_obsraw.pth --seed 1 --action-scale 5.0 --obs-mode raw --verbose
+python -m src.models.rl.train_ppo --steps 200 --save models/ppo_s1_scale5.0_obsreturns.pth --seed 1 --action-scale 5.0 --obs-mode returns --verbose

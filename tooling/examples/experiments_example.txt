@@ -1,0 +1,4 @@
+# Example experiments file for a quick smoke run
+python -c "print('hello from experiment 1')"
+python -c "import time; print('sleep 1'); time.sleep(1); print('done')"
+python -c "print('hello from experiment 3')"

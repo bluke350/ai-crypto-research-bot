@@ -2,6 +2,7 @@ import sys
 import subprocess
 import json
 import pickle
+import os
 from pathlib import Path
 
 
@@ -40,7 +41,10 @@ def test_cli_eval_csv(tmp_path):
         str(outdir),
     ]
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    env = os.environ.copy()
+    # ensure repo root is on PYTHONPATH so orchestration/cli.py can import `src`
+    env["PYTHONPATH"] = str(Path.cwd())
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if proc.returncode != 0:
         raise AssertionError(f"CLI failed (rc={proc.returncode})\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
 

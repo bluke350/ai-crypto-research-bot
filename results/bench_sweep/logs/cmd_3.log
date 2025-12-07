@@ -1,0 +1,4 @@
+
+--- ATTEMPT 1 START 2025-10-24T14:42:37.408190Z ---
+PPO update steps=200 episodes=1 rollout_return=-1.767396 stats={'policy_loss': 0.5058292150497437, 'value_loss': 0.18173456192016602, 'entropy': 1.4312405586242676}
+training finished {'episodes': 1, 'total_steps': 200}
