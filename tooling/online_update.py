@@ -284,14 +284,14 @@ def main(argv=None):
             conn = sqlite3.connect(str(reg_path))
             cur = conn.cursor()
             cur.execute('''CREATE TABLE IF NOT EXISTS models
-                        (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, metric REAL, timestamp INTEGER, commit TEXT)''')
+                        (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, metric REAL, timestamp INTEGER, git_commit TEXT)''')
             # get git commit if available
             commit = None
             try:
                 commit = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
             except Exception:
                 commit = ''
-            cur.execute('INSERT INTO models (path, metric, timestamp, commit) VALUES (?,?,?,?)', (str(args.out), float(new_metric), int(time.time()), commit))
+            cur.execute('INSERT INTO models (path, metric, timestamp, git_commit) VALUES (?,?,?,?)', (str(args.out), float(new_metric), int(time.time()), commit))
             conn.commit()
             conn.close()
             print('Wrote model registry entry to', reg_path)
