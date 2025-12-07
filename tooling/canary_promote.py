@@ -96,6 +96,10 @@ def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument('--buffer-root', default=ROOT / 'data' / 'online_buffer')
     p.add_argument('--model-path', default=str(MODEL_PATH))
+    p.add_argument('--out', default='canary_out.json')
+    p.add_argument('--fee-bps', type=float, default=5.0, help='Per-trade fee in bps')
+    p.add_argument('--slippage-bps', type=float, default=10.0, help='Per-trade slippage in bps')
+    p.add_argument('--position-size', type=float, default=1.0, help='Fraction of equity to allocate')
     args = p.parse_args(argv)
 
     fetch_from_s3_if_needed()
@@ -117,9 +121,41 @@ def main(argv=None):
         print('No recent data for shadow eval')
         return 3
 
-    metrics = shadow_eval(model, df.tail(200))
+    # use the last N rows for the backtest/eval
+    window = df.tail(200)
+    metrics = shadow_eval(model, window)
+    # if returns exist, run the production backtester to get realistic metrics
+    if 'return' in window.columns:
+        try:
+            from tooling.backtester import run_backtest
+
+            # recompute preds to pass into backtester
+            X = window.select_dtypes(include=[float, int]).drop(columns=['label', 'return'], errors='ignore')
+            if hasattr(model, 'predict_proba'):
+                prob = model.predict_proba(X)[:, 1]
+                preds = (prob > 0.5).astype(int)
+            else:
+                preds = model.predict(X)
+
+            bt_metrics, equity = run_backtest(
+                returns=window['return'].fillna(0).to_numpy(),
+                signals=preds,
+                initial_capital=1.0,
+                fee_bps=args.fee_bps,
+                slippage_bps=args.slippage_bps,
+                position_size=args.position_size,
+            )
+            metrics.update(bt_metrics)
+        except Exception as e:
+            print('Backtester error:', e)
+
     print('Shadow eval metrics:', json.dumps(metrics))
-    # In a real system, compare to thresholds and trigger deployment
+    # write metrics to out file for workflow consumption
+    try:
+        with open(args.out, 'w') as f:
+            json.dump(metrics, f, indent=2)
+    except Exception:
+        pass
     return 0
 
 
