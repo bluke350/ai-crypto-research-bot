@@ -1,0 +1,26 @@
+name: Online Model Update
+
+on:
+  schedule:
+    - cron: '*/30 * * * *' # every 30 minutes
+  workflow_dispatch: {}
+
+jobs:
+  online-update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install scikit-learn torch
+      - name: Run online updater
+        run: |
+          mkdir -p models
+          # run updater conservatively; it will check buffer size before updating
+          python tooling/online_update.py --model models/opportunity.pkl --out models/opportunity-online-updated.pkl --min-rows 50
