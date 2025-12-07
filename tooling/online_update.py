@@ -190,6 +190,8 @@ def main(argv=None):
     p.add_argument('--label-col', type=str, default='label')
     p.add_argument('--epochs', type=int, default=1)
     p.add_argument('--replay-frac', type=float, default=0.2)
+    p.add_argument('--improve-tol', type=float, default=0.0, help='Relative improvement required to promote (e.g. 0.001 = 0.1%%)')
+    p.add_argument('--force-promote', action='store_true', help='Force promotion (for testing)')
     args = p.parse_args(argv)
 
     # load buffer data
@@ -253,7 +255,13 @@ def main(argv=None):
     adwin.update(base_metric)
     adwin.update(new_metric)
     # If ADWIN signals change and new_metric < base_metric then accept
-    promote = (new_metric < base_metric) and adwin.change_detected
+    # decide promotion: require relative improvement unless forced
+    rel_improve = (base_metric - new_metric) / (abs(base_metric) + 1e-12)
+    promote = False
+    if args.force_promote:
+        promote = True
+    else:
+        promote = (rel_improve >= args.improve_tol) and adwin.change_detected
     if promote:
         print('Promotion gate passed; saving model to', args.out)
         save_model(model, args.out)
@@ -268,6 +276,27 @@ def main(argv=None):
                 print('Uploaded updated model to s3://%s/%s' % (s3_bucket, s3_key))
         except Exception:
             pass
+        # record metadata into a simple SQLite registry
+        try:
+            import sqlite3, time, subprocess
+            reg_path = ROOT / 'experiments' / 'registry.db'
+            reg_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(reg_path))
+            cur = conn.cursor()
+            cur.execute('''CREATE TABLE IF NOT EXISTS models
+                        (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, metric REAL, timestamp INTEGER, commit TEXT)''')
+            # get git commit if available
+            commit = None
+            try:
+                commit = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
+            except Exception:
+                commit = ''
+            cur.execute('INSERT INTO models (path, metric, timestamp, commit) VALUES (?,?,?,?)', (str(args.out), float(new_metric), int(time.time()), commit))
+            conn.commit()
+            conn.close()
+            print('Wrote model registry entry to', reg_path)
+        except Exception as e:
+            print('Failed to write registry entry:', e)
     else:
         print('Promotion gate failed; not saving model')
 
