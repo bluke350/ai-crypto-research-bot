@@ -41,4 +41,23 @@ Notes
 - The script prefers S3 download (boto3). If boto3 is not installed it will still try the `gh` CLI approach.
 - Do not commit secrets to the repository. Use GitHub Secrets or a secure credential manager for CI.
 
+Git hooks to prevent accidental commits
+-------------------------------------
+- This repo includes a lightweight pre-commit script at `.githooks/pre-commit` that scans staged files for common AWS credential patterns (e.g., `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AKIA...`).
+- To enable the hook locally for this repository run:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+- After enabling hooks, attempts to commit files that contain likely credentials will be blocked. This is a convenience safeguard — keep rotating credentials and storing secrets in GitHub Secrets.
+
+Versioning and 'latest' pointer
+--------------------------------
+- The retrain workflow now uploads the artifact to a timestamped key in S3 (e.g. `models/opportunity-20251207T0300Z.pkl`) and also copies the current model to `models/opportunity-latest.pkl`. This keeps a historical record while providing a stable key for runtime fetchers.
+
+Rotation reminder
+-----------------
+- If you accidentally exposed an access key (even briefly), rotate it immediately in the AWS Console (IAM -> Users -> Security credentials -> Create access key / Delete old key). Update your GitHub Secrets and local `.env` accordingly.
+
 If you want support for other storage providers (GCS, Azure Blob), I can add that as well.

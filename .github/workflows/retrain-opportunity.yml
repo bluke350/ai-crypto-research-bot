@@ -42,11 +42,17 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Copy model to S3
+      - name: Copy model to S3 (timestamped + latest)
         if: secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '' && env.S3_BUCKET != ''
         env:
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
-          S3_KEY: ${{ secrets.S3_KEY || 'models/opportunity.pkl' }}
+          # allow optional override; otherwise create a timestamped key
+          S3_KEY: ${{ secrets.S3_KEY }}
         run: |
-          echo "Uploading models/opportunity.pkl -> s3://${S3_BUCKET}/${S3_KEY}"
-          aws s3 cp models/opportunity.pkl s3://${S3_BUCKET}/${S3_KEY} --acl private
+          TS=$(date -u +"%Y%m%dT%H%M%SZ")
+          KEY=${S3_KEY:-models/opportunity-${TS}.pkl}
+          echo "Uploading models/opportunity.pkl -> s3://${S3_BUCKET}/${KEY}"
+          aws s3 cp models/opportunity.pkl s3://${S3_BUCKET}/${KEY} --acl private
+          # copy to a stable 'latest' key for easy retrieval
+          echo "Also updating latest pointer: s3://${S3_BUCKET}/models/opportunity-latest.pkl"
+          aws s3 cp models/opportunity.pkl s3://${S3_BUCKET}/models/opportunity-latest.pkl --acl private

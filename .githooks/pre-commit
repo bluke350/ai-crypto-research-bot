@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Prevent committing files that look like AWS credentials or other secrets.
+# Install: `git config core.hooksPath .githooks` to enable for this repo.
+
+set -euo pipefail
+
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+if [ -z "$STAGED_FILES" ]; then
+  exit 0
+fi
+
+FOUND=0
+echo "Scanning staged files for high-risk secrets..."
+for f in $STAGED_FILES; do
+  # Only check text files to reduce false positives
+  if file --brief --mime-type "$f" 2>/dev/null | grep -q text; then
+    if grep -nE "(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AKIA[0-9A-Z]{16})" "$f" >/dev/null 2>&1; then
+      echo "Potential secret found in staged file: $f"
+      grep -nE "(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AKIA[0-9A-Z]{16})" "$f" || true
+      FOUND=1
+    fi
+  fi
+done
+
+if [ "$FOUND" -ne 0 ]; then
+  echo "Commit aborted: secret-like patterns found in staged files. Remove secrets and try again."
+  echo "To enable hooks for this repo (one-time): git config core.hooksPath .githooks"
+  exit 1
+fi
+
+exit 0
