@@ -14,6 +14,8 @@ LOG = logging.getLogger(__name__)
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument('--config', type=str, default='configs/project.yaml', help='Path to project config')
+    p.add_argument('--config-check', action='store_true', help='Validate config and exit')
     p.add_argument("--model", type=str, default="rl", choices=("rl", "ml", "transformer"))
     p.add_argument("--steps", type=int, default=200)
     p.add_argument("--save", type=str, default="models/ppo.pth")
@@ -34,6 +36,23 @@ def main():
     p.add_argument("--regime-sample-mode", type=str, default="per-regime", choices=("per-regime", "balanced"), help="Sampling mode when building per-regime datasets")
     p.add_argument("--regime-sample-size", type=int, default=0, help="If >0, target number of rows per regime (will sample/upsample accordingly)")
     args = p.parse_args()
+
+    # Optional config validation hook
+    if getattr(args, 'config_check', False):
+        try:
+            # Import the validator and run
+            from tooling.validate_config import run as validate_run
+            rc = validate_run([args.config])
+            if rc != 0:
+                print('Config validation failed')
+                raise SystemExit(rc)
+            print('Config validation passed')
+            raise SystemExit(0)
+        except SystemExit:
+            raise
+        except Exception as e:
+            print('Config validation failed (exception):', e)
+            raise SystemExit(3)
 
     os.makedirs(args.out, exist_ok=True)
     run_id = str(uuid.uuid4())
