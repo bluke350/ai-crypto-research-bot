@@ -24,12 +24,13 @@ class RLPolicyStrategy:
     - Action returned by the actor is passed through tanh and scaled by `size`.
     """
 
-    def __init__(self, ckpt_path: str, size: float = 1.0, obs_window: int = 32, device: Optional[str] = None):
+    def __init__(self, ckpt_path: str, size: float = 1.0, obs_window: Optional[int] = None, device: Optional[str] = None):
         if not os.path.exists(ckpt_path):
             raise FileNotFoundError(ckpt_path)
         self.ckpt_path = ckpt_path
         self.size = float(size)
-        self.obs_window = int(obs_window)
+        # obs_window may be None: infer from checkpoint below when possible
+        self.obs_window = int(obs_window) if obs_window is not None else None
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         data = torch.load(ckpt_path, map_location="cpu")
@@ -58,6 +59,21 @@ class RLPolicyStrategy:
         self.actor = Actor(obs_dim=int(in_dim), act_dim=1).to(self.device)
         self.actor.load_state_dict(actor_sd)
         self.actor.eval()
+
+        # If obs_window was not provided by the caller, adopt the checkpoint's input dim.
+        # If a caller provided an obs_window, ensure it matches the checkpoint input
+        # dimension; raise a clear error if incompatible to avoid silent shape mismatches.
+        if self.obs_window is None:
+            self.obs_window = int(in_dim)
+        else:
+            try:
+                if int(self.obs_window) != int(in_dim):
+                    raise ValueError(
+                        f"Provided obs_window={self.obs_window} incompatible with checkpoint input dim={in_dim}"
+                    )
+            except Exception:
+                # if casting failed, raise a ValueError for clarity
+                raise ValueError("Invalid obs_window provided; must be an integer compatible with model input dim")
 
     def _build_obs(self, recent_closes: pd.Series) -> torch.Tensor:
         import numpy as _np

@@ -28,7 +28,8 @@ def _compute_state_from_exec_logs(artifacts_root: str = "experiments/artifacts")
             if f.lower().endswith('.parquet'):
                 df = pd.read_parquet(f)
             else:
-                df = pd.read_csv(f)
+                from src.utils.io import load_prices_csv
+                df = load_prices_csv(f, dedupe='first')
         except Exception:
             LOG.exception("failed to read exec log %s", f)
             continue

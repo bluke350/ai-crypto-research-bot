@@ -110,7 +110,8 @@ def run_live(checkpoint_path: str,
 
     # data source: read CSV fully but we'll stream rows; if not provided, synthetic
     if prices_csv:
-        df = pd.read_csv(prices_csv)
+        from src.utils.io import load_prices_csv
+        df = load_prices_csv(prices_csv, dedupe='first')
         if 'timestamp' in df.columns:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df = df.set_index('timestamp')

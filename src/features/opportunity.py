@@ -73,7 +73,20 @@ class OpportunityPredictor:
         if self.model is None:
             # fallback: simple heuristic score (recent_return * 100 - vol * 10 + momentum)
             return (X[:, 0] * 100.0) - (X[:, 1] * 10.0) + (X[:, 3] * 100.0)
-        return self.model.predict(X)
+        try:
+            return self.model.predict(X)
+        except Exception as e:
+            # If sklearn pipeline not fitted, fall back to heuristic scoring for robustness
+            try:
+                from sklearn.exceptions import NotFittedError
+                if isinstance(e, NotFittedError):
+                    return (X[:, 0] * 100.0) - (X[:, 1] * 10.0) + (X[:, 3] * 100.0)
+            except Exception:
+                # best-effort string match for older sklearn versions
+                if 'not fitted' in str(e).lower():
+                    return (X[:, 0] * 100.0) - (X[:, 1] * 10.0) + (X[:, 3] * 100.0)
+            # otherwise re-raise
+            raise
 
     def save(self, path: str):
         if self.model is None:
@@ -125,7 +138,17 @@ class AnomalyDetector:
         if self.model is None:
             # no model: return all non-anomalous
             return np.ones(X.shape[0], dtype=int)
-        pred = self.model.predict(X)
+        try:
+            pred = self.model.predict(X)
+        except Exception as e:
+            try:
+                from sklearn.exceptions import NotFittedError
+                if isinstance(e, NotFittedError):
+                    return np.ones(X.shape[0], dtype=int)
+            except Exception:
+                if 'not fitted' in str(e).lower():
+                    return np.ones(X.shape[0], dtype=int)
+            raise
         # sklearn's IsolationForest returns 1 for normal, -1 for anomalous
         return (pred == 1).astype(int)
 

@@ -55,10 +55,14 @@ def main():
     # If --replay is specified, load historical price data and create a ReplayEnv
     # Replay from CSV (explicit) takes precedence over pair-based loading
     if getattr(args, "replay_csv", None):
-        import pandas as _pd
-        prices = _pd.read_csv(args.replay_csv)
-        if 'timestamp' in prices.columns:
-            prices['timestamp'] = _pd.to_datetime(prices['timestamp'], utc=True)
+        # use centralized CSV loader which handles timestamp parsing and dedupe
+        try:
+            from src.utils.io import load_prices_csv
+        except Exception:
+            load_prices_csv = None
+        if load_prices_csv is None:
+            raise RuntimeError("replay support requires CSV loader (src.utils.io.load_prices_csv)")
+        prices = load_prices_csv(args.replay_csv)
         if 'close' not in prices.columns:
             raise RuntimeError("replay CSV must contain 'close' column")
         prices = prices[['timestamp', 'close']]

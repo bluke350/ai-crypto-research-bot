@@ -42,7 +42,8 @@ def main(argv=None):
 
     if args.input_csv:
         import pandas as pd
-        df = pd.read_csv(args.input_csv)
+        from src.utils.io import load_prices_csv
+        df = load_prices_csv(args.input_csv, dedupe='first')
         if df.shape[0] == 0:
             raise ValueError('input CSV is empty')
         row = df.iloc[0].values.tolist()

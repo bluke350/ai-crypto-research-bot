@@ -22,10 +22,9 @@ LOG = logging.getLogger(__name__)
 
 def load_prices(prices_csv: Optional[str], symbol: Optional[str]) -> pd.DataFrame:
     if prices_csv:
-        df = pd.read_csv(prices_csv)
-        if 'timestamp' in df.columns:
-            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-        return df
+        from src.utils.io import load_prices_csv
+        # default dedupe behavior is 'first' for backward compatibility
+        return load_prices_csv(prices_csv, dedupe='first')
     try:
         sym = symbol or (load_yaml('configs/kraken.yaml').get('kraken', {}).get('symbols', ['XBT/USD'])[0])
         return kraken_rest.get_ohlc(sym, '1m', since=0)
@@ -38,6 +37,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--symbol', type=str, default=None)
     p.add_argument('--prices-csv', type=str, default=None)
+    p.add_argument('--dedupe', type=str, default='first', choices=('none','first','last','mean'), help='How to handle duplicate timestamps in CSV: none|first|last|mean')
     p.add_argument('--optimizer', type=str, default='bayes', choices=('bayes', 'random', 'optuna'))
     p.add_argument('--optuna-db', type=str, default=None, help='Optuna DB URL (sqlite:///path) to use for study storage')
     p.add_argument('--optuna-pruner', type=str, default='median', choices=('median', 'asha'), help='Optuna pruner to use when optimizer=optuna')
@@ -53,6 +53,30 @@ def main():
     args = p.parse_args()
 
     prices = load_prices(args.prices_csv, args.symbol)
+    # if user explicitly requested a dedupe mode, and we loaded from CSV, apply it
+    if getattr(args, 'dedupe', None) and args.prices_csv and args.dedupe != 'first':
+        try:
+            # re-run loader with requested dedupe
+            from src.utils.io import load_prices_csv
+            prices = load_prices_csv(args.prices_csv, dedupe=args.dedupe)
+        except Exception:
+            LOG.exception('failed to apply dedupe mode %s', args.dedupe)
+    # if user explicitly requested a dedupe mode, and we loaded from CSV, apply it
+    if getattr(args, 'dedupe', None) and args.prices_csv and args.dedupe != 'first':
+        try:
+            if args.dedupe == 'none':
+                pass
+            elif args.dedupe in ('first','last'):
+                prices = prices.drop_duplicates(subset=['timestamp'], keep=args.dedupe).reset_index(drop=True)
+            elif args.dedupe == 'mean':
+                num_cols = prices.select_dtypes(include=['number']).columns.tolist()
+                other_cols = [c for c in prices.columns if c not in (num_cols + ['timestamp'])]
+                agg_dict = {c: 'mean' for c in num_cols}
+                for c in other_cols:
+                    agg_dict[c] = 'last'
+                prices = prices.groupby('timestamp', sort=True, as_index=False).agg(agg_dict)
+        except Exception:
+            LOG.exception('failed to apply dedupe mode %s', args.dedupe)
 
     if args.param_space:
         param_space = json.loads(args.param_space)

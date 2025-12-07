@@ -165,7 +165,8 @@ def run_inprocess_trader(pair: str, ckpt: str, cash: float, poll_interval: float
 
     # load prices
     if not use_ws and initial_prices_csv and Path(initial_prices_csv).exists():
-        df = pd.read_csv(initial_prices_csv)
+        from src.utils.io import load_prices_csv
+        df = load_prices_csv(initial_prices_csv, dedupe='first')
         if 'timestamp' in df.columns:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df = df.set_index('timestamp')

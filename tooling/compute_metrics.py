@@ -15,7 +15,8 @@ def main():
         print('usage: compute_metrics.py <csv>')
         return
     path = sys.argv[1]
-    df = pd.read_csv(path, parse_dates=['timestamp'])
+    from src.utils.io import load_prices_csv
+    df = load_prices_csv(path, dedupe='first')
     print('head:')
     print(df.head(12).to_string(index=False))
     nav = df['nav']

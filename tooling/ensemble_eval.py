@@ -43,7 +43,8 @@ def per_run_eval(ckpt: str, pair: str, data_root: str, out_dir: str, run_seed: i
 
 
 def averaged_from_runs(run_files, out_path):
-    dfs = [pd.read_csv(p, parse_dates=["timestamp"]) for p in run_files]
+    from src.utils.io import load_prices_csv
+    dfs = [load_prices_csv(p, dedupe='first') for p in run_files]
     # align by timestamp (inner join)
     merged = pd.concat([df.set_index("timestamp")["nav"] for df in dfs], axis=1)
     mean_nav = merged.mean(axis=1)

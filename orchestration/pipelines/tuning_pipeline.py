@@ -23,6 +23,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--symbol", type=str, default=None)
     p.add_argument("--prices-csv", type=str, default=None)
+    p.add_argument("--dedupe", type=str, default="first", choices=["none", "first", "last", "mean"], help="How to handle duplicate timestamps in CSV: none|first|last|mean")
     p.add_argument("--param-space", type=str, default=None, help="JSON string describing param_space")
     p.add_argument("--n-trials", type=int, default=10)
     p.add_argument("--optimizer", type=str, default="bayes", choices=["bayes", "random", "optuna"], help="Which optimizer to use for tuning")
@@ -53,9 +54,9 @@ def main():
     # load data (csv or REST)
     prices: Optional[pd.DataFrame] = None
     if args.prices_csv:
-        prices = pd.read_csv(args.prices_csv)
-        if "timestamp" in prices.columns:
-            prices["timestamp"] = pd.to_datetime(prices["timestamp"], utc=True)
+        # use shared CSV loader with dedupe support
+        from src.utils.io import load_prices_csv
+        prices = load_prices_csv(args.prices_csv, dedupe=args.dedupe)
     else:
         try:
             prices = kraken_rest.get_ohlc(symbol, "1m", since=0)

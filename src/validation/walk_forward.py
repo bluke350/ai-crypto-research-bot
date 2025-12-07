@@ -131,6 +131,20 @@ def evaluate_walk_forward(
                 raise ValueError("either 'targets' or 'strategy_factory' must be provided for final evaluation")
             test_targets = targets.loc[f["test"].index]
 
+        # ensure targets are positionally aligned with prices before backtest
+        try:
+            import pandas as _pd
+            if isinstance(test_targets, _pd.Series):
+                if "timestamp" in f["test"].columns:
+                    test_targets = test_targets.reindex(f["test"]["timestamp"]).ffill().fillna(0.0).reset_index(drop=True)
+                elif isinstance(f["test"].index, _pd.DatetimeIndex):
+                    test_targets = test_targets.reindex(f["test"].index).ffill().fillna(0.0).reset_index(drop=True)
+                else:
+                    test_targets = _pd.Series(test_targets.values[: len(f["test"])])
+        except Exception:
+            # if alignment fails, leave as-is and let run_backtest raise a helpful error
+            pass
+
         out = run_backtest(f["test"], test_targets, sim)
         pnl = out["pnl"]
         metrics = _evaluate_pnl_metrics(pnl)

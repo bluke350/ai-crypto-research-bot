@@ -201,7 +201,8 @@ def csv_to_replay_parquet(prices_csv: str, pair: str, data_root: str = "data/raw
     Returns the path to the directory written for the pair or None on failure.
     """
     try:
-        df = pd.read_csv(prices_csv)
+        from src.utils.io import load_prices_csv
+        df = load_prices_csv(prices_csv, dedupe='first')
     except Exception:
         LOG.exception("failed to read prices csv %s", prices_csv)
         return None

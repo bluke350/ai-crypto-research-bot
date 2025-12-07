@@ -112,4 +112,21 @@ Start the controller as a background process (with wrapper and log rotation):
   -PythonPath .\.venv\Scripts\python.exe -MaxLogSizeMB 20 -MaxRotatedFiles 7 -UseWrapper -WorkingDirectory C:\workspace\ai-crypto-research-bot
 ```
 
+## CSV loader and deduplication
+
+The project uses a centralized CSV loader `src.utils.io.load_prices_csv(path, dedupe=...)` for all price CSV inputs. It:
+
+- Parses a `timestamp` column to UTC datetimes when present.
+- Detects duplicate timestamps and optionally deduplicates rows using modes: `none`, `first`, `last`, or `mean`.
+
+Common CLI flags that accept CSV inputs (for example `--prices-csv` or `--replay-csv`) now support a `--dedupe` option in many pipelines. Default behavior is `--dedupe first` which keeps the first row for duplicate timestamps.
+
+If you have CSVs with noisy duplicated timestamps, pass `--dedupe mean` to aggregate numeric columns by mean across duplicates, or `--dedupe last` to keep the latest row.
+
+Example usage (training pipeline):
+
+```bash
+python -m orchestration.pipelines.training_pipeline --regime-prices-csv examples/XBT_USD_prices.csv --dedupe mean
+```
+
 

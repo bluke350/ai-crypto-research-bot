@@ -8,6 +8,7 @@ import sys
 from typing import Optional
 
 import pandas as pd
+from src.utils.io import load_prices_csv
 
 LOG = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ def main():
     p.add_argument("--regime-window", type=int, default=252, help="Rolling window for regime volatility detection")
     p.add_argument("--regime-sample-mode", type=str, default="per-regime", choices=("per-regime", "balanced"), help="Sampling mode when building per-regime datasets")
     p.add_argument("--regime-sample-size", type=int, default=0, help="If >0, target number of rows per regime (will sample/upsample accordingly)")
+    p.add_argument("--dedupe", type=str, default="first", choices=("none", "first", "last", "mean"), help="How to dedupe duplicate timestamps when loading CSVs")
     args = p.parse_args()
 
     # Optional config validation hook
@@ -66,7 +68,7 @@ def main():
     if args.regime_enable:
         if args.regime_prices_csv and os.path.exists(args.regime_prices_csv):
             try:
-                df_prices = pd.read_csv(args.regime_prices_csv)
+                df_prices = load_prices_csv(args.regime_prices_csv, dedupe=args.dedupe)
                 if 'timestamp' in df_prices.columns:
                     df_prices['timestamp'] = pd.to_datetime(df_prices['timestamp'], utc=True)
                     df_prices = df_prices.set_index('timestamp')
@@ -232,7 +234,7 @@ def main():
                 parts = []
                 for p in csv_paths:
                     try:
-                        dft = pd.read_csv(p)
+                        dft = load_prices_csv(p, dedupe=args.dedupe)
                         parts.append(dft)
                     except Exception:
                         continue

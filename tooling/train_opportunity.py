@@ -59,7 +59,8 @@ def main(argv=None):
     p.add_argument('--output', required=True)
     args = p.parse_args(argv)
 
-    df = pd.read_csv(args.prices_csv)
+    from src.utils.io import load_prices_csv
+    df = load_prices_csv(args.prices_csv, dedupe='first')
     X, y = build_dataset(df, window=args.window)
     predictor = OpportunityPredictor()
     try:

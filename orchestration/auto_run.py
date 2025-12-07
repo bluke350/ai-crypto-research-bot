@@ -99,7 +99,8 @@ def main():
     if args.prices_csv:
         if not os.path.exists(args.prices_csv):
             raise FileNotFoundError(args.prices_cvs)
-        df = pd.read_csv(args.prices_csv)
+        from src.utils.io import load_prices_csv
+        df = load_prices_csv(args.prices_csv, dedupe='first')
         # prefer timestamp col if present
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"])

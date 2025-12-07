@@ -15,7 +15,8 @@ def _load_csvs(data_root: str):
     frames = []
     for p in paths:
         try:
-            df = pd.read_csv(p)
+            from src.utils.io import load_prices_csv
+            df = load_prices_csv(p, dedupe='first')
             frames.append(df)
         except Exception:
             continue

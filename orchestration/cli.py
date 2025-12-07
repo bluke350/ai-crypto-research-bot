@@ -292,7 +292,8 @@ def main():
             if not os.path.exists(args.prices_csv):
                 raise FileNotFoundError(f"prices CSV not found: {args.prices_csv}")
             # load CSV; try to parse timestamp column or assume first column contains timestamps
-            df = pd.read_csv(args.prices_csv)
+            from src.utils.io import load_prices_csv
+            df = load_prices_csv(args.prices_csv, dedupe='first')
             # prefer user-specified timestamp column
             if args.timestamp_col in df.columns:
                 df[args.timestamp_col] = pd.to_datetime(df[args.timestamp_col])

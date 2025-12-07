@@ -26,6 +26,32 @@ def run_backtest(prices: pd.DataFrame, targets: pd.Series, simulator=None, *, ex
     if prices is None or len(prices) == 0:
         raise ValueError("prices must not be empty")
     prices = prices.sort_values("timestamp").reset_index(drop=True)
+
+    # best-effort: allow targets to be indexed by timestamps (DatetimeIndex)
+    # and reindex them to the prices' timestamp column. This makes the
+    # backtester resilient to callers that provide datetime-indexed Series.
+    try:
+        import pandas as _pd
+        if isinstance(targets, _pd.Series):
+            # if prices has a timestamp column, use it for alignment
+            if "timestamp" in prices.columns and not isinstance(targets.index, _pd.RangeIndex):
+                try:
+                    # align targets to the prices' timestamp values
+                    aligned = targets.reindex(prices["timestamp"]).fillna(method="ffill").fillna(0.0)
+                    targets = aligned.reset_index(drop=True)
+                except Exception:
+                    # fall back to positional handling below
+                    pass
+            elif isinstance(prices.index, _pd.DatetimeIndex) and not isinstance(targets.index, _pd.RangeIndex):
+                try:
+                    aligned = targets.reindex(prices.index).fillna(method="ffill").fillna(0.0)
+                    targets = aligned.reset_index(drop=True)
+                except Exception:
+                    pass
+    except Exception:
+        # ignore alignment failures and validate by length below
+        pass
+
     if len(prices) != len(targets):
         raise ValueError("prices and targets must align and have same length")
 

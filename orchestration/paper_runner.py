@@ -41,7 +41,8 @@ def run_paper(checkpoint_path: str,
     if prices_csv:
         if not os.path.exists(prices_csv):
             raise FileNotFoundError(prices_csv)
-        df = pd.read_csv(prices_csv)
+        from src.utils.io import load_prices_csv
+        df = load_prices_csv(prices_csv, dedupe='first')
         # try to locate timestamp column
         if 'timestamp' in df.columns:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
