@@ -246,6 +246,25 @@ def main(argv=None):
         if after < before:
             print(f'Dropped {before-after} rows with NaNs from training data')
 
+    # Align numeric features to model expected input size (if available)
+    def align_features(Xdf, model):
+        if Xdf is None:
+            return Xdf
+        Xnum = Xdf.select_dtypes(include=[np.number]).copy()
+        n_features = getattr(model, 'n_features_in_', None)
+        if n_features is not None:
+            cols = list(Xnum.columns)
+            if len(cols) > n_features:
+                Xnum = Xnum.iloc[:, :n_features]
+            elif len(cols) < n_features:
+                # pad with zero columns
+                for i in range(n_features - len(cols)):
+                    Xnum[f'_pad_{i}'] = 0.0
+        return Xnum
+
+    X_train = align_features(X_train, model)
+    X_val = align_features(X_val, model)
+
     # attempt partial_fit
     updated = False
     if try_partial_fit(model, X_train, y_train, classes=classes, epochs=args.epochs):

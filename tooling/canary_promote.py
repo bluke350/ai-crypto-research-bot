@@ -43,7 +43,8 @@ def load_model(path: Path):
 
 def shadow_eval(model, df: pd.DataFrame):
     # Basic shadow eval: compute log-loss if predict_proba available
-    X = df.drop(columns=['label'], errors='ignore')
+    # Use numeric feature columns only, exclude label/return
+    X = df.select_dtypes(include=[float, int]).drop(columns=['label', 'return'], errors='ignore')
     y = df.get('label')
     metrics = {}
     if 'return' in df.columns:
