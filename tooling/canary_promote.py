@@ -25,7 +25,8 @@ MODEL_PATH = ROOT / 'models' / 'opportunity-latest.pkl'
 def fetch_from_s3_if_needed():
     s3_bucket = os.environ.get('S3_BUCKET')
     s3_key = os.environ.get('S3_KEY', 'models/opportunity-latest.pkl')
-    if s3_bucket and not MODEL_PATH.exists():
+    # Only attempt S3 download if bucket and credentials are available
+    if s3_bucket and os.environ.get('AWS_ACCESS_KEY_ID') and not MODEL_PATH.exists():
         try:
             import boto3
             MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -78,8 +79,13 @@ def main(argv=None):
     fetch_from_s3_if_needed()
     mp = Path(args.model_path)
     if not mp.exists():
-        print('Model not found at', mp)
-        return 2
+        # fallback to local model if latest not present
+        alt = ROOT / 'models' / 'opportunity.pkl'
+        if alt.exists():
+            mp = alt
+        else:
+            print('Model not found at', mp)
+            return 2
 
     model = load_model(mp)
     # sample recent data

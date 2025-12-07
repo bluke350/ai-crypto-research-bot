@@ -232,6 +232,20 @@ def main(argv=None):
             X_train = pd.concat([X_train, X_replay], ignore_index=True)
             y_train = pd.concat([y_train, y_replay], ignore_index=True)
 
+    # drop rows with NaNs to avoid sklearn errors (tests may produce small toy datasets)
+    if X_train is not None:
+        before = len(X_train)
+        mask = X_train.notna().all(axis=1)
+        X_train = X_train.loc[mask].reset_index(drop=True)
+        if y_train is not None:
+            y_train = y_train.loc[mask].reset_index(drop=True)
+        after = len(X_train)
+        if after == 0:
+            print('All training rows contain NaNs; skipping update')
+            return 0
+        if after < before:
+            print(f'Dropped {before-after} rows with NaNs from training data')
+
     # attempt partial_fit
     updated = False
     if try_partial_fit(model, X_train, y_train, classes=classes, epochs=args.epochs):
