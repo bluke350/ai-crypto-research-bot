@@ -31,6 +31,8 @@ def run_backtest(
     fee_bps: float = 5.0,
     slippage_bps: float = 10.0,
     position_size: float = 1.0,
+    fixed_fee: float = 0.0,
+    partial_fill_pct: float = 1.0,
 ) -> Tuple[dict, np.ndarray]:
     """Run a simple backtest and return metrics + equity curve.
 
@@ -61,18 +63,38 @@ def run_backtest(
 
     # track last position for trade detection
     last_pos = 0.0
+    # track any pending remainder of a partial fill (signed position remaining to execute)
+    pending_exec = 0.0
     for i in range(n):
         target_pos = pos[i] * position_size
-        # detect trade: difference in absolute position
-        trade_amt = abs(target_pos - last_pos) * equity[i]
-        # apply trade cost immediately
-        trade_cost = trade_amt * fee_rate
-        # update equity after costs
-        equity[i] -= trade_cost
-        # apply market return for the position held during this bar
-        pnl = target_pos * ret[i] * equity[i]
+        # desired change in position
+        delta = target_pos - last_pos
+
+        exec_amt = 0.0
+        # if there's a pending execution from previous partial fill, execute it first
+        if pending_exec != 0.0:
+            # execute pending amount now
+            exec_now = pending_exec
+            trade_amt_pending = abs(exec_now) * equity[i]
+            trade_cost_pending = trade_amt_pending * fee_rate + fixed_fee
+            equity[i] -= trade_cost_pending
+            pending_exec = 0.0
+            last_pos += exec_now
+            # note: do not apply pnl for pending execution until position is in place for the bar
+
+        # execute current trade partially according to partial_fill_pct
+        if delta != 0.0:
+            exec_now = delta * partial_fill_pct
+            # remaining portion will be queued as pending_exec (to be executed next bar)
+            pending_exec = delta - exec_now
+            trade_amt = abs(exec_now) * equity[i]
+            trade_cost = trade_amt * fee_rate + fixed_fee
+            equity[i] -= trade_cost
+            last_pos += exec_now
+
+        # apply market return for the position held during this bar (last_pos)
+        pnl = last_pos * ret[i] * equity[i]
         equity[i + 1] = equity[i] + pnl
-        last_pos = target_pos
 
     # compute metrics
     strat_returns = np.diff(equity) / equity[:-1]
