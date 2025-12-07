@@ -23,4 +23,4 @@ jobs:
         run: |
           mkdir -p models
           # run updater conservatively; it will check buffer size before updating
-          python tooling/online_update.py --model models/opportunity.pkl --out models/opportunity-online-updated.pkl --min-rows 50
+          python tooling/online_update.py --model models/opportunity.pkl --out models/opportunity-online-updated.pkl --min-rows 50 --improve-tol 0.001

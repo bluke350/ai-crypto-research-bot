@@ -190,7 +190,7 @@ def main(argv=None):
     p.add_argument('--label-col', type=str, default='label')
     p.add_argument('--epochs', type=int, default=1)
     p.add_argument('--replay-frac', type=float, default=0.2)
-    p.add_argument('--improve-tol', type=float, default=0.0, help='Relative improvement required to promote (e.g. 0.001 = 0.1%%)')
+    p.add_argument('--improve-tol', type=float, default=0.001, help='Relative improvement required to promote (e.g. 0.001 = 0.1%%)')
     p.add_argument('--force-promote', action='store_true', help='Force promotion (for testing)')
     args = p.parse_args(argv)
 
