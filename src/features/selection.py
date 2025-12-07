@@ -5,6 +5,7 @@ import math
 
 import pandas as pd
 import numpy as np
+from .opportunity import ml_rank_universe, OpportunityPredictor, AnomalyDetector
 
 
 def volatility_rank(prices: pd.DataFrame, window: int = 60) -> float:
@@ -57,14 +58,29 @@ def correlation_rank(prices_df: pd.DataFrame) -> _t.Dict[str, float]:
     return out
 
 
-def rank_universe(prices_by_symbol: _t.Dict[str, pd.DataFrame], min_volume: float = 0.0, vol_window: int = 60) -> _t.List[str]:
-    """Rank symbols by combined heuristic: liquidity pass, then ascending volatility and correlation.
+def rank_universe(prices_by_symbol: _t.Dict[str, pd.DataFrame], min_volume: float = 0.0, vol_window: int = 60, *, use_ml: bool = True, predictor: OpportunityPredictor | None = None, anomaly_detector: AnomalyDetector | None = None, ml_window: int = 20) -> _t.List[str]:
+    """Rank symbols in the universe.
 
-    Returns list of symbol names sorted ascending by score where lower is better.
-    Score = normalized volatility + normalized correlation - liquidity_bonus (higher liquidity reduces score).
+    By default this uses the ML-based `ml_rank_universe` which returns symbols ranked by
+    predicted opportunity (higher first). For legacy behavior set `use_ml=False`.
+
+    Parameters:
+    - prices_by_symbol: mapping symbol -> DataFrame with at least `close` column
+    - min_volume, vol_window: legacy heuristic params (used when `use_ml=False`)
+    - use_ml: if True, call ML ranking pipeline (heuristic fallback used if sklearn not available)
+    - predictor, anomaly_detector: optional prebuilt predictor/detector instances
+    - ml_window: window size used by ML feature builder
+
+    Returns a list of symbol names ordered by preference (best first).
     """
     if not prices_by_symbol:
         return []
+    if use_ml:
+        ranked = ml_rank_universe(prices_by_symbol, predictor=predictor, anomaly_detector=anomaly_detector, window=ml_window)
+        # ml_rank_universe returns list of (symbol, score, is_normal)
+        return [s for s, _score, _ok in ranked]
+
+    # Legacy heuristic path retained for compatibility
     # prepare stats
     vol_scores = {}
     liq_ok = {}

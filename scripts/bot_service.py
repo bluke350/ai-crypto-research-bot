@@ -31,6 +31,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+try:
+    from src.features.opportunity import OpportunityPredictor, AnomalyDetector, ml_rank_universe
+except Exception:
+    OpportunityPredictor = None
+    AnomalyDetector = None
+    ml_rank_universe = None
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_RAW = ROOT / "data" / "raw"
@@ -172,6 +178,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("Live trading requires --execute. Aborting.")
         return 2
 
+    # attempt to load persisted opportunity predictor once, to avoid repeated IO
+    predictor = None
+    detector = None
+    model_path = ROOT / 'models' / 'opportunity.pkl'
+    anom_path = ROOT / 'models' / 'opportunity_anom.pkl'
+    # If model isn't present, attempt to fetch artifact via GitHub CLI (best-effort)
+    if not model_path.exists():
+        try:
+            subprocess.run([sys.executable, str(ROOT / 'tooling' / 'fetch_opportunity_artifact.py')], check=False)
+        except Exception:
+            pass
+    if OpportunityPredictor is not None and model_path.exists():
+        try:
+            predictor = OpportunityPredictor.load(str(model_path))
+            logger.info("Loaded OpportunityPredictor from %s", model_path)
+        except Exception:
+            predictor = None
+    if AnomalyDetector is not None and anom_path.exists():
+        try:
+            detector = AnomalyDetector.load(str(anom_path))
+            logger.info("Loaded AnomalyDetector from %s", anom_path)
+        except Exception:
+            detector = None
+
     logger.info("Bot starting; execute=%s trade=%s", args.execute, args.trade)
     def run_iteration() -> int:
         selector_path = ROOT / "experiments" / "pair_selection.json"
@@ -191,21 +221,62 @@ def main(argv: Optional[List[str]] = None) -> int:
                 logger.exception("failed to read pair selector output; falling back to parquet discovery")
                 pairs = discover_usd_pairs(DATA_RAW)
         else:
-            try:
-                # request at least `top_k` candidates from the selector
-                requested = max(args.n_candidates, args.top_k)
-                run_cmd = [sys.executable, "-m", "scripts.pair_selector", "--top-k", str(requested), "--lookback-minutes", str(60 * 24)]
-                logger.info("Running pair selector: %s", " ".join(run_cmd))
-                subprocess.run(run_cmd, check=True)
-                sel = json.loads(selector_path.read_text(encoding="utf-8"))
-                for c in sel.get("candidates", []):
-                    p = c.get("pair")
-                    if p:
+            # Prefer ML ranking if we loaded a predictor
+            if predictor is not None and ml_rank_universe is not None:
+                try:
+                    # build price dict for discovered pairs
+                    discovered = discover_usd_pairs(DATA_RAW)
+                    prices = {}
+                    for pair in discovered:
+                        try:
+                            candidate_parquets = [p for p in DATA_RAW.glob('**/bars.parquet') if pair.replace('/', '') in str(p) or pair in str(p)]
+                            if not candidate_parquets:
+                                continue
+                            latest = max(candidate_parquets, key=lambda p: p.stat().st_mtime)
+                            df = pd.read_parquet(latest)
+                            if 'timestamp' in df.columns:
+                                df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+                                df = df.sort_values('timestamp').reset_index(drop=True)
+                            prices[pair] = df[['close'] + (['volume'] if 'volume' in df.columns else [])].copy()
+                        except Exception:
+                            continue
+                    ranked = ml_rank_universe(prices, predictor=predictor, anomaly_detector=detector)
+                    for p, score, ok in ranked[: max(args.n_candidates, args.top_k)]:
                         pairs.append(p)
-                        pair_scores[p] = float(c.get("score", 0.0))
-            except Exception:
-                logger.exception("pair selector failed; falling back to parquet discovery")
-                pairs = discover_usd_pairs(DATA_RAW)
+                        pair_scores[p] = float(score)
+                except Exception:
+                    logger.exception("ML selector failed; falling back to CLI/heuristic")
+                    # fallback to invoking the selector CLI
+                    try:
+                        requested = max(args.n_candidates, args.top_k)
+                        run_cmd = [sys.executable, "-m", "scripts.pair_selector", "--top-k", str(requested), "--lookback-minutes", str(60 * 24)]
+                        logger.info("Running pair selector: %s", " ".join(run_cmd))
+                        subprocess.run(run_cmd, check=True)
+                        sel = json.loads(selector_path.read_text(encoding="utf-8"))
+                        for c in sel.get("candidates", []):
+                            p = c.get("pair")
+                            if p:
+                                pairs.append(p)
+                                pair_scores[p] = float(c.get("score", 0.0))
+                    except Exception:
+                        logger.exception("pair selector failed; falling back to parquet discovery")
+                        pairs = discover_usd_pairs(DATA_RAW)
+            else:
+                try:
+                    # request at least `top_k` candidates from the selector
+                    requested = max(args.n_candidates, args.top_k)
+                    run_cmd = [sys.executable, "-m", "scripts.pair_selector", "--top-k", str(requested), "--lookback-minutes", str(60 * 24)]
+                    logger.info("Running pair selector: %s", " ".join(run_cmd))
+                    subprocess.run(run_cmd, check=True)
+                    sel = json.loads(selector_path.read_text(encoding="utf-8"))
+                    for c in sel.get("candidates", []):
+                        p = c.get("pair")
+                        if p:
+                            pairs.append(p)
+                            pair_scores[p] = float(c.get("score", 0.0))
+                except Exception:
+                    logger.exception("pair selector failed; falling back to parquet discovery")
+                    pairs = discover_usd_pairs(DATA_RAW)
 
         # ensure we have at least `top_k` candidates; if selector/discovery returned fewer,
         # extend using raw parquet discovery (preserving existing ordering and uniqueness)

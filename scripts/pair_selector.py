@@ -14,6 +14,7 @@ import json
 import logging
 from math import sqrt
 from pathlib import Path
+from pathlib import Path as _Path
 from typing import Dict, List
 
 import numpy as np
@@ -104,6 +105,78 @@ def main(argv=None) -> int:
     p.add_argument("--out", default=str(OUT))
     args = p.parse_args(argv)
 
+    try:
+        from src.features.opportunity import OpportunityPredictor, AnomalyDetector, ml_rank_universe
+    except Exception:
+        OpportunityPredictor = None
+        AnomalyDetector = None
+        ml_rank_universe = None
+
+    pairs = discover_pairs(DATA_RAW)
+    logger.info("Discovered %d pairs", len(pairs))
+
+    scored = []
+    for pair in pairs:
+        try:
+            s = score_pair(pair, lookback_minutes=args.lookback_minutes)
+            scored.append(s)
+        except Exception as e:
+            logger.debug("Skipping %s: %s", pair, e)
+
+    ranked = sorted(scored, key=lambda x: x.get("score", 0.0), reverse=True)
+    out = {"created_at": pd.Timestamp.utcnow().isoformat(), "candidates": ranked[: args.top_k]}
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(out, indent=2))
+    logger.info("Wrote pair selection top %d -> %s", args.top_k, out_path)
+    return 0
+
+    # Try ML-based selection if an OpportunityPredictor exists at models/opportunity.pkl
+    model_path = ROOT / 'models' / 'opportunity.pkl'
+    if ml_rank_universe is not None and model_path.exists():
+        try:
+            # build price dict for discovered pairs
+            pairs = discover_pairs(DATA_RAW)
+            logger.info("Discovered %d pairs (ml flow)", len(pairs))
+            prices = {}
+            for pair in pairs:
+                # find latest parquet for pair
+                candidate_parquets = [p for p in DATA_RAW.glob('**/bars.parquet') if pair.replace('/', '') in str(p) or pair in str(p)]
+                if not candidate_parquets:
+                    continue
+                latest = max(candidate_parquets, key=lambda p: p.stat().st_mtime)
+                df = pd.read_parquet(latest)
+                if 'timestamp' in df.columns:
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+                    df = df.sort_values('timestamp').reset_index(drop=True)
+                prices[pair] = df[['close'] + (['volume'] if 'volume' in df.columns else [])].copy()
+
+            predictor = None
+            detector = None
+            try:
+                predictor = OpportunityPredictor.load(str(model_path)) if OpportunityPredictor is not None else None
+            except Exception:
+                predictor = None
+            # anomaly detector optional: look for models/opportunity_anom.pkl
+            anom_path = ROOT / 'models' / 'opportunity_anom.pkl'
+            if AnomalyDetector is not None and anom_path.exists():
+                try:
+                    detector = AnomalyDetector.load(str(anom_path))
+                except Exception:
+                    detector = None
+
+            ranked = ml_rank_universe(prices, predictor=predictor, anomaly_detector=detector)[: args.top_k]
+            scored = [{'pair': s, 'score': float(score), 'is_normal': bool(ok)} for s, score, ok in ranked]
+            out = {"created_at": pd.Timestamp.utcnow().isoformat(), "candidates": scored}
+            out_path = Path(args.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(out, indent=2))
+            logger.info("Wrote ML pair selection top %d -> %s", args.top_k, out_path)
+            return 0
+        except Exception as e:
+            logger.exception("ML pair selection failed, falling back to heuristic: %s", e)
+
+    # fallback to heuristic scoring
     pairs = discover_pairs(DATA_RAW)
     logger.info("Discovered %d pairs", len(pairs))
 
