@@ -8,7 +8,7 @@ from __future__ import annotations
 import pickle
 from pathlib import Path
 import numpy as np
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import SGDClassifier
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_DIR = ROOT / "models"
@@ -23,8 +23,14 @@ def main():
     ])
     y = np.hstack([np.zeros(200), np.ones(200)])
 
-    clf = LogisticRegression(max_iter=200)
-    clf.fit(X, y)
+    # Use SGDClassifier with log loss to support partial_fit (online updates)
+    clf = SGDClassifier(loss='log_loss', max_iter=1000)
+    # partial_fit requires classes on first call
+    classes = np.unique(y)
+    clf.partial_fit(X[:10], y[:10], classes=classes)
+    # do a few epochs of partial_fit to initialize
+    for _ in range(5):
+        clf.partial_fit(X, y)
 
     out = MODEL_DIR / "opportunity.pkl"
     with open(out, 'wb') as f:

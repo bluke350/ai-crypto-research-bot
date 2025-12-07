@@ -105,16 +105,38 @@ def evaluate_predict(model, X: pd.DataFrame, y: pd.Series):
     if y is None or X is None or X.empty:
         return None
     try:
+        # sklearn classifier with predict_proba
         if hasattr(model, 'predict_proba'):
             p = model.predict_proba(X)[:, 1]
-            # clip
             p = np.clip(p, 1e-6, 1 - 1e-6)
             loss = -np.mean(y * np.log(p) + (1 - y) * np.log(1 - p))
             return float(loss)
-        else:
+        # sklearn-like with predict only
+        if hasattr(model, 'predict'):
             preds = model.predict(X)
             acc = (preds == y).mean()
             return float(1 - acc)
+        # PyTorch model (torch.nn.Module)
+        try:
+            import torch
+            if isinstance(model, torch.nn.Module):
+                model.eval()
+                with torch.no_grad():
+                    X_t = torch.tensor(X.values.astype('float32'))
+                    out = model(X_t)
+                    probs = out.squeeze().cpu().numpy()
+                    # if outputs are logits or shape >1, handle accordingly
+                    if probs.ndim > 1 and probs.shape[1] > 1:
+                        # assume softmax-like outputs
+                        from scipy.special import softmax
+                        probs = softmax(probs, axis=1)[:, 1]
+                    # ensure 1D
+                    probs = np.asarray(probs).ravel()
+                    probs = np.clip(probs, 1e-6, 1 - 1e-6)
+                    loss = -np.mean(y * np.log(probs) + (1 - y) * np.log(1 - probs))
+                    return float(loss)
+        except Exception:
+            pass
     except Exception:
         return None
 
