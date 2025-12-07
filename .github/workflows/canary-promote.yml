@@ -1,0 +1,50 @@
+name: Canary Promote
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 */6 * * *' # every 6 hours
+
+jobs:
+  canary-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install scikit-learn
+      - name: Run canary promotion check
+        id: canary
+        run: |
+          PYTHONPATH=. python tooling/canary_promote.py > canary_out.json || true
+          cat canary_out.json
+      - name: Parse metrics and promote to prod S3 key
+        if: env.S3_BUCKET != ''
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_KEY_PROD: ${{ secrets.S3_KEY_PROD || 'models/opportunity-prod.pkl' }}
+        run: |
+          # read pnl metric if present, else skip
+          if [ -f canary_out.json ]; then
+            PNL=$(jq -r '.pnl // "null"' canary_out.json)
+            echo "PNL: $PNL"
+            # simple threshold: if pnl > 0 then promote
+            if [ "$PNL" != "null" ] && (( $(echo "$PNL > 0" | bc -l) )); then
+              echo "Promoting model to prod S3 key"
+              aws s3 cp models/opportunity-latest.pkl s3://${S3_BUCKET}/${S3_KEY_PROD} --acl private
+            else
+              echo "No promotion: pnl is null or not positive"
+            fi
+          else
+            echo "No canary output found"
+          fi
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}

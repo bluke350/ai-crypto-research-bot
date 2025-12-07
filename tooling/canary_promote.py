@@ -44,15 +44,29 @@ def shadow_eval(model, df: pd.DataFrame):
     # Basic shadow eval: compute log-loss if predict_proba available
     X = df.drop(columns=['label'], errors='ignore')
     y = df.get('label')
+    metrics = {}
+    if 'return' in df.columns:
+        # simple simulated PnL: take sign(pred - 0.5) * return and report mean
+        if hasattr(model, 'predict_proba'):
+            p = model.predict_proba(X)[:, 1]
+        else:
+            p = model.predict(X)
+        p = np.asarray(p).ravel()
+        preds_sign = np.sign(p - 0.5)
+        pnl = (preds_sign * df['return'].values).mean()
+        metrics['pnl'] = float(pnl)
+
     if hasattr(model, 'predict_proba'):
         p = model.predict_proba(X)[:, 1]
         p = np.clip(p, 1e-6, 1 - 1e-6)
         loss = -np.mean(y * np.log(p) + (1 - y) * np.log(1 - p))
-        return {'logloss': float(loss)}
+        metrics['logloss'] = float(loss)
     else:
         preds = model.predict(X)
         acc = float((preds == y).mean())
-        return {'1-acc': 1.0 - acc}
+        metrics['1-acc'] = 1.0 - acc
+
+    return metrics
 
 
 def main(argv=None):
