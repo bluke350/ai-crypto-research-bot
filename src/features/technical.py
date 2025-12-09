@@ -112,9 +112,45 @@ def bollinger(df: pd.DataFrame, window: int = 20, k: float = 2.0) -> pd.DataFram
     })
 
 
+def realized_volatility(df: pd.DataFrame, window: int = 30) -> pd.DataFrame:
+    """Compute realized volatility as rolling std of log returns.
+
+    Returns column: `rv_{window}` (per-period volatility, not annualized).
+    """
+    df = _validate(df)
+    close = df["close"].astype(float)
+    logret = np.log(close).diff()
+    rv = logret.rolling(window=window, min_periods=1).std()
+    return pd.DataFrame({"timestamp": df["timestamp"], f"rv_{window}": rv})
+
+
+def rolling_volume_stats(df: pd.DataFrame, window: int = 30) -> pd.DataFrame:
+    """Compute rolling volume mean and z-score as lightweight microstructure features.
+
+    Returns columns: `vol_mean_{window}`, `vol_z_{window}`
+    """
+    df = _validate(df)
+    vol = df["volume"].astype(float)
+    vm = vol.rolling(window=window, min_periods=1).mean()
+    vs = vol.rolling(window=window, min_periods=1).std().replace(0, np.nan)
+    z = (vol - vm) / vs
+    return pd.DataFrame({
+        "timestamp": df["timestamp"],
+        f"vol_mean_{window}": vm,
+        f"vol_z_{window}": z.fillna(0.0),
+    })
+
+
 def all_technical(df: pd.DataFrame, rsi_window=14, macd_params=(12, 26, 9), atr_window=14, bollinger_params=(20, 2.0)) -> pd.DataFrame:
     """Return a DataFrame joining common technical indicators aligned by timestamp."""
-    parts = [rsi(df, rsi_window), macd(df, *macd_params), atr(df, atr_window), bollinger(df, *bollinger_params)]
+    parts = [
+        rsi(df, rsi_window),
+        macd(df, *macd_params),
+        atr(df, atr_window),
+        bollinger(df, *bollinger_params),
+        realized_volatility(df, window=30),
+        rolling_volume_stats(df, window=30),
+    ]
     out = parts[0]
     for p in parts[1:]:
         out = out.merge(p, on="timestamp", how="outer")

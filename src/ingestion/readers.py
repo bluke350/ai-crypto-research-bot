@@ -49,4 +49,16 @@ def snapshot_to_parquet(symbol: str, start: str, end: str, df: Optional[pd.DataF
     sha_path = out_path + ".sha256"
     with open(sha_path, "w", encoding="utf-8") as f:
         f.write(h.hexdigest())
+    # compute QA metrics and write companion JSON
+    try:
+        from src.ingestion.quality import compute_qa_metrics
+        qa = compute_qa_metrics(df, interval='1m')
+        qa_path = out_path + '.qa.json'
+        import json
+
+        with open(qa_path, 'w', encoding='utf-8') as qf:
+            json.dump(qa, qf, indent=2)
+    except Exception:
+        # non-fatal — QA best-effort
+        pass
     return out_path

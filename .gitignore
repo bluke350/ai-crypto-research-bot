@@ -1,4 +1,10 @@
 __pycache__/
 .venv/
 experiments/
+# Local secrets
+.env
 *.pyc
+# Ignore any accidentally exported credential files in results/
+results/AWS_ACCESS_KEY_ID=*
+results/*AWS_SECRET_ACCESS_KEY=*
+results/*AWS_SESSION_TOKEN=*

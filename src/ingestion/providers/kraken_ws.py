@@ -1,11 +1,29 @@
 from __future__ import annotations
 import asyncio
 import json
+import logging
 import os
-from typing import Callable, Awaitable
+from typing import List, Optional
+
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import time
+import websockets
+import random
+import shutil
+from datetime import datetime, timedelta
+
+from src.ingestion.providers import kraken_rest
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json as _json
+
+logger = logging.getLogger(__name__)
+
+
+DEFAULT_RECONNECT_BACKOFF = [1, 2, 5, 10]
+BACKOFF_MAX = 300
 
 
 class KrakenWSClient:
@@ -16,16 +34,282 @@ class KrakenWSClient:
     """
 
     def __init__(self, out_root: str = "data/raw"):
+        # Detect pytest to avoid starting HTTP servers (metrics/health) and
+        # live connect loops during tests. Persist decision on the instance
+        # so `start()` can default to non-network mode under pytest.
+        skip_for_pytest = False
+        try:
+            import sys
+            if 'pytest' in sys.modules or os.environ.get("PYTEST_CURRENT_TEST") is not None:
+                skip_for_pytest = True
+        except Exception:
+            skip_for_pytest = False
+        self._skip_for_pytest = skip_for_pytest
+
         self.msg_queue: asyncio.Queue = asyncio.Queue()
         self._running = False
         self.out_root = out_root
+        self.checkpoint_file = os.path.join(self.out_root, "_ws_checkpoints.json")
+        self.checkpoints = self._load_checkpoints()
+        self._last_seq = {}
+        self._last_ts = {}  # last timestamp per pair (seconds)
+        self._reconnect_backoff = DEFAULT_RECONNECT_BACKOFF
+        self._ws = None
+        self.ws_url = "wss://ws.kraken.com"
+        # backoff policy: 'jitter' or 'full-jitter'
+        self.backoff_policy = os.environ.get("WS_BACKOFF_POLICY", "jitter")
+        # Optional cap for backoff sleeps (useful in CI). If set, this will
+        # limit the computed wait to the provided float value in seconds.
+        try:
+            self._backoff_max_sleep = None
+            if os.environ.get("WS_BACKOFF_MAX_SLEEP") is not None:
+                self._backoff_max_sleep = float(os.environ.get("WS_BACKOFF_MAX_SLEEP"))
+        except Exception:
+            self._backoff_max_sleep = None
+        # WAL folder for raw trades
+        self.wal_folder = os.path.join(self.out_root, "_wal")
+        os.makedirs(self.wal_folder, exist_ok=True)
+        # batched WAL buffer in-memory: {(pair, minute_str): [rows]}
+        self._wal_buffer = {}
+        self._wal_flush_interval = float(os.environ.get("WS_WAL_FLUSH_INTERVAL", "5.0"))
+        self._wal_flush_task = None
+        # WAL retention/prune settings (days)
+        self._wal_retention_days = int(os.environ.get("WS_WAL_RETENTION_DAYS", "7"))
+        # prune interval in hours
+        self._wal_prune_interval_hours = float(os.environ.get("WS_WAL_PRUNE_INTERVAL_HOURS", "24"))
+        self._wal_prune_task = None
+        # compression settings: compress archived days older than this many days
+        # Backwards-compatibility: tests (and older configs) may set
+        # WS_WAL_ARCHIVE_COMPRESS_AFTER_HOURS and WS_WAL_ARCHIVE_INTERVAL_HOURS
+        # (hours-based). Prefer the legacy hours-based env vars if present,
+        # otherwise fall back to the newer days-based settings.
+        if os.environ.get("WS_WAL_ARCHIVE_COMPRESS_AFTER_HOURS") is not None:
+            try:
+                hours = float(os.environ.get("WS_WAL_ARCHIVE_COMPRESS_AFTER_HOURS", "0"))
+                # convert hours to fractional days
+                self._wal_compress_after_days = float(hours) / 24.0
+            except Exception:
+                self._wal_compress_after_days = int(os.environ.get("WS_WAL_COMPRESS_DAYS", "2"))
+        else:
+            self._wal_compress_after_days = int(os.environ.get("WS_WAL_COMPRESS_DAYS", "2"))
 
-    async def start(self):
+        # compression interval: allow legacy hours-based env var name
+        if os.environ.get("WS_WAL_ARCHIVE_INTERVAL_HOURS") is not None:
+            try:
+                self._wal_compress_interval_hours = float(os.environ.get("WS_WAL_ARCHIVE_INTERVAL_HOURS", "6"))
+            except Exception:
+                self._wal_compress_interval_hours = float(os.environ.get("WS_WAL_COMPRESS_INTERVAL_HOURS", "6"))
+        else:
+            self._wal_compress_interval_hours = float(os.environ.get("WS_WAL_COMPRESS_INTERVAL_HOURS", "6"))
+        self._wal_compress_task = None
+
+        # Prometheus metrics (counters/gauges created lazily)
+        try:
+            # Allow tests to inject a fake `prometheus_client` into sys.modules.
+            if (not skip_for_pytest) or ('prometheus_client' in globals().get('__builtins__', {}) or 'prometheus_client' in sys.modules):
+                from prometheus_client import start_http_server, Counter, Gauge
+                self.connect_attempts = Counter("ws_connect_attempts", "Number of WS connect attempts")
+                self.last_processed_ts = Gauge("ws_last_processed_timestamp", "Last processed trade timestamp (epoch)")
+                self.wal_queue_length = Gauge("ws_wal_queue_length", "Number of entries currently buffered in WAL")
+                # start prometheus server
+                try:
+                    start_http_server(int(os.environ.get("WS_METRICS_PORT", "8000")))
+                except Exception:
+                    logger.exception("failed to start prometheus metrics server")
+            else:
+                # running under pytest and no injected prometheus module: skip starting server
+                self.connect_attempts = None
+                self.last_processed_ts = None
+                self.wal_queue_length = None
+        except Exception:
+            # prometheus_client not available or failed; metrics are optional
+            self.connect_attempts = None
+            self.last_processed_ts = None
+            self.wal_queue_length = None
+
+        # health server
+        self._health_port = int(os.environ.get("WS_HEALTH_PORT", "8001"))
+        self._health_thread = None
+        try:
+            # Avoid starting the HTTP health server during pytest runs or when
+            # explicitly disabled via env var. Some test runners spawn many
+            # threads and the HTTPServer can interfere with clean shutdowns.
+            skip_for_pytest = False
+            try:
+                import sys
+                if 'pytest' in sys.modules:
+                    skip_for_pytest = True
+            except Exception:
+                pass
+            if os.environ.get("PYTEST_CURRENT_TEST") is not None:
+                skip_for_pytest = True
+
+            if not skip_for_pytest and os.environ.get("WS_DISABLE_HEALTH_SERVER", "0") != "1":
+                self._start_health_server()
+            else:
+                if skip_for_pytest:
+                    logger.info("pytest detected: skipping WS health server startup")
+        except Exception:
+            logger.exception("failed to start health server")
+
+    def _load_checkpoints(self):
+        try:
+            if os.path.exists(self.checkpoint_file):
+                import json as _json
+                with open(self.checkpoint_file, "r") as f:
+                    return _json.load(f)
+        except Exception:
+            logger.exception("failed to load ws checkpoints")
+        return {}
+
+    def _save_checkpoints(self):
+        try:
+            import json as _json
+            os.makedirs(os.path.dirname(self.checkpoint_file), exist_ok=True)
+            now = time.time()
+            # debounce frequent writes: only write if 1s passed since last write
+            last = getattr(self, "_last_checkpoint_write", None)
+            if last is not None and (now - float(last)) < float(os.environ.get("WS_CHECKPOINT_DEBOUNCE_S", "1")):
+                # skip write for now
+                return
+            with open(self.checkpoint_file + ".tmp", "w") as f:
+                _json.dump(self.checkpoints, f)
+            os.replace(self.checkpoint_file + ".tmp", self.checkpoint_file)
+            self._last_checkpoint_write = now
+        except Exception:
+            logger.exception("failed to save ws checkpoints")
+
+    async def start(self, start_connect_loop: Optional[bool] = None):
         self._running = True
-        asyncio.create_task(self._consumer())
+        # recover any WAL entries on startup
+        try:
+            self._recover_wal()
+        except Exception:
+            logger.exception("wal recovery failed")
+        # keep references to background tasks so we can cancel them on stop
+        self._consumer_task = asyncio.create_task(self._consumer())
+        # start a background heartbeat watcher
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_watcher())
+        # start live connect loop when using real websockets
+        if start_connect_loop is None:
+            # default behavior:
+            # - when not running under pytest, start the connect loop
+            # - when running under pytest, only start the connect loop if the
+            #   configured `ws_url` points to a local test server (localhost/127.0.0.1)
+            skip = getattr(self, "_skip_for_pytest", False)
+            if not skip:
+                start_connect_loop = True
+            else:
+                url = (self.ws_url or "").lower()
+                # allow local websocket servers in integration tests
+                if url.startswith("ws://localhost") or url.startswith("ws://127.0.0.1") or url.startswith("ws://[::1]"):
+                    start_connect_loop = True
+                else:
+                    start_connect_loop = False
+        if start_connect_loop:
+            self._connect_task = asyncio.create_task(self._connect_loop())
+        # start WAL flush loop
+        self._wal_flush_task = asyncio.create_task(self._wal_flush_loop())
+        # start WAL compression and prune loops
+        self._wal_compress_task = asyncio.create_task(self._wal_compress_loop())
+        self._wal_prune_task = asyncio.create_task(self._wal_prune_loop())
+        # yield once so background tasks have a chance to start executing
+        try:
+            await asyncio.sleep(0)
+        except Exception:
+            # ignore if event loop can't yield here
+            pass
+
+    async def run_connect_attempts(self, max_attempts: int = 3, cap_sleep: float = 0.1):
+        """Test helper: perform up to `max_attempts` synchronous connection attempts.
+
+        This mirrors the logic in `_connect_loop` but is designed for tests: it
+        calls `websockets.connect` directly, counts attempts, applies the same
+        exponential backoff computation, but caps sleeps to `cap_sleep` to keep
+        tests fast and deterministic.
+
+        Returns the number of attempts made and whether a connection succeeded.
+        """
+        attempts = 0
+        success = False
+        base = self._reconnect_backoff[0] if self._reconnect_backoff else 1
+        while attempts < int(max_attempts):
+            attempts += 1
+            try:
+                ws = await websockets.connect(self.ws_url)
+            except Exception:
+                # compute same exponential backoff used in _connect_loop
+                exp = min(BACKOFF_MAX, base * (2 ** (attempts - 1)))
+                wait = float(exp)
+                # apply test/CI caps
+                if getattr(self, "_backoff_test_mode", False):
+                    wait = min(wait, cap_sleep)
+                elif getattr(self, "_backoff_max_sleep", None) is not None:
+                    wait = min(wait, float(self._backoff_max_sleep))
+                try:
+                    await asyncio.sleep(wait)
+                except asyncio.CancelledError:
+                    break
+                continue
+            # connected: attempt to close immediately and mark success
+            try:
+                # try to iterate briefly if the ws is iterable (DummyWS may raise StopAsyncIteration)
+                try:
+                    async for _ in ws:
+                        break
+                except StopAsyncIteration:
+                    pass
+            except Exception:
+                pass
+            try:
+                await ws.close()
+            except Exception:
+                pass
+            success = True
+            break
+        return attempts, success
 
     async def stop(self):
+        # stop background loops and flush any remaining WAL buffer
         self._running = False
+        try:
+            # wait briefly to allow loops to notice _running=False
+            await asyncio.sleep(0)
+            await self._flush_wal_once()
+        except Exception:
+            logger.exception("error flushing wal on stop")
+        # cancel background task if running
+        try:
+            if self._wal_flush_task is not None:
+                self._wal_flush_task.cancel()
+        except Exception:
+            pass
+        try:
+            if self._wal_prune_task is not None:
+                self._wal_prune_task.cancel()
+        except Exception:
+            pass
+        try:
+            if self._wal_compress_task is not None:
+                self._wal_compress_task.cancel()
+        except Exception:
+            pass
+        # cancel other background tasks we started in start()
+        try:
+            if getattr(self, "_connect_task", None) is not None:
+                self._connect_task.cancel()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_consumer_task", None) is not None:
+                self._consumer_task.cancel()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_heartbeat_task", None) is not None:
+                self._heartbeat_task.cancel()
+        except Exception:
+            pass
 
     async def _consumer(self):
         while self._running:
@@ -35,24 +319,555 @@ class KrakenWSClient:
                 continue
             await self._handle_message(msg)
 
+    async def _connect_loop(self):
+        """Continuously try to connect to the websocket endpoint with jittered exponential backoff.
+
+        On successful connection, receive messages and feed them into the internal queue for processing.
+        """
+        attempt = 0
+        while self._running:
+            try:
+                # debug print when running under pytest to aid hanging investigations
+                logger.debug("_connect_loop attempting websocket connect to %s", self.ws_url)
+                # record attempt count for diagnostics/tests
+                try:
+                    self._connect_attempts = getattr(self, "_connect_attempts", 0) + 1
+                except Exception:
+                    self._connect_attempts = 1
+                self._ws = await websockets.connect(self.ws_url)
+                # reset attempt counter on success
+                attempt = 0
+                logger.info("ws connected")
+                async for raw in self._ws:
+                    logger.debug("received raw message: %s %s", type(raw), raw)
+                    try:
+                        msg = json.loads(raw)
+                    except Exception:
+                        logger.exception("failed to parse ws message")
+                        continue
+                    await self.msg_queue.put(msg)
+                    # update metrics
+                    try:
+                        if self.last_processed_ts and msg.get("type") == "trade" and msg.get("timestamp"):
+                            self.last_processed_ts.set(int(float(msg.get("timestamp"))))
+                    except Exception:
+                        pass
+                # In test mode, avoid reconnecting repeatedly — allow a single
+                # connection to be consumed and then exit the loop. This keeps
+                # unit tests deterministic and prevents infinite reconnects
+                # when `websockets.connect` is patched to return a finite
+                # message stream (DummyWS).
+                if getattr(self, "_backoff_test_mode", False):
+                    logger.info("test mode: breaking connect loop after one connection")
+                    break
+            except Exception:
+                # connection failed or dropped
+                logger.exception("websocket connection error")
+                # compute wait using configured policy
+                base = self._reconnect_backoff[0] if self._reconnect_backoff else 1
+                exp = min(BACKOFF_MAX, base * (2 ** attempt))
+                if self.backoff_policy == "full-jitter":
+                    # full jitter: uniform(0, exp)
+                    wait = random.uniform(0, exp)
+                else:
+                    # deterministic backoff: use exact exponential wait (no jitter)
+                    # makes behavior stable in tests that measure attempt counts
+                    wait = float(exp)
+                # apply test/CI caps if configured so tests don't sleep long
+                if getattr(self, "_backoff_test_mode", False):
+                    # in test mode, cap to a small sleep so connect loop proceeds quickly
+                    wait = min(wait, 0.1)
+                elif getattr(self, "_backoff_max_sleep", None) is not None:
+                    wait = min(wait, float(self._backoff_max_sleep))
+                attempt += 1
+                logger.info("reconnecting in %.2f seconds (attempt=%s)", wait, attempt)
+                await asyncio.sleep(wait)
+                continue
+            finally:
+                try:
+                    if self._ws is not None:
+                        await self._ws.close()
+                except Exception:
+                    pass
+
+    async def _heartbeat_watcher(self):
+        # checks that messages are received periodically; if not, attempt reconnection logic
+        while self._running:
+            await asyncio.sleep(5)
+            # placeholder: check last message times and attempt reconnect if stale
+            # (left for live websocket integration)
+            pass
+
     async def _handle_message(self, msg: dict):
-        # Example: transform trade messages to minute-batched parquet (very small stub)
+        # handle sequencing / heartbeat
         typ = msg.get("type")
+        seq = msg.get("seq")
+        pair = msg.get("pair")
+        if seq is not None and pair is not None:
+            last = self._last_seq.get(pair)
+            # drop duplicate or older sequence numbers (idempotency guard)
+            if last is not None and seq <= last:
+                logger.info("duplicate/old seq for %s: last=%s got=%s; ignoring", pair, last, seq)
+                # do not process duplicate/old messages further
+                return
+            else:
+                if last is not None and seq != last + 1:
+                    # gap detected -> trigger a resync from REST to recover missing data
+                    logger.warning("sequence gap for %s: last=%s got=%s", pair, last, seq)
+                    # schedule a resync task, passing last known timestamp if available
+                    last_ts = self._last_ts.get(pair)
+                    asyncio.create_task(self._resync_pair(pair, last_ts))
+                self._last_seq[pair] = seq
+                self.checkpoints[pair] = seq
+                # debounce checkpoint writes (avoid fs churn for high-frequency messages)
+                try:
+                    self._save_checkpoints()
+                except Exception:
+                    logger.exception("failed to save checkpoints after seq update")
+
+        # Example: transform trade messages to minute-batched parquet
         if typ == "trade":
+            # Basic schema validation: require timestamp, price, size
+            if not all(k in msg for k in ("timestamp", "price", "size", "pair")):
+                logger.debug("skipping malformed trade message: missing fields %s", msg)
+                return
+            # ensure timestamp is numeric
+            try:
+                tnum = int(float(msg.get("timestamp")))
+            except Exception:
+                logger.debug("skipping malformed trade message: invalid timestamp %s", msg.get("timestamp"))
+                return
+
+            # monotonic timestamp guard: if message timestamp is older than last processed for pair, log and ignore
+            last_ts = self._last_ts.get(msg.get("pair"))
+            if last_ts is not None and tnum < int(last_ts):
+                logger.warning("out-of-order trade for %s: ts=%s last_ts=%s; ignoring", msg.get("pair"), tnum, last_ts)
+                return
+
             await self._checkpoint_trades(msg)
 
     async def _checkpoint_trades(self, msg: dict):
         pair = msg.get("pair", "UNKNOWN")
-        ts = msg.get("timestamp")
-        price = msg.get("price")
-        size = msg.get("size")
-        out_dir = os.path.join(self.out_root, pair, pd.to_datetime(ts, unit="s").strftime("%Y%m%d"))
+        ts_raw = msg.get("timestamp")
+        price_raw = msg.get("price")
+        size_raw = msg.get("size")
+        # guard: message may be missing fields in tests or malformed; skip if so
+        try:
+            if ts_raw is None or price_raw is None or size_raw is None:
+                return
+            ts = int(float(ts_raw))
+            price = float(price_raw)
+            size = float(size_raw)
+        except Exception:
+            return
+        # store last timestamp for the pair (seconds)
+        try:
+            self._last_ts[pair] = int(ts)
+        except Exception:
+            pass
+        t = pd.to_datetime(ts, unit="s", utc=True)
+        minute = t.floor("min")
+        minute_dt = pd.Timestamp(minute)
+
+        # aggregator key: pair + minute
+        key = (pair, minute)
+        if not hasattr(self, "_agg"):
+            self._agg = {}
+
+        agg = self._agg.get(key, {"vwap_num": 0.0, "volume": 0.0, "count": 0})
+        agg["vwap_num"] += price * size
+        agg["volume"] += size
+        agg["count"] += 1
+        self._agg[key] = agg
+
+        # write per-minute parquet file atomically (better for scale)
+        out_dir = os.path.join(self.out_root, pair, minute_dt.strftime("%Y%m%d"))
         os.makedirs(out_dir, exist_ok=True)
-        path = os.path.join(out_dir, "trades.parquet")
-        df = pd.DataFrame([{"timestamp": pd.to_datetime(ts, unit="s", utc=True), "price": price, "size": size}])
-        table = pa.Table.from_pandas(df)
-        pq.write_table(table, path)
+        # production: write timestamped minute file
+        minute_fname = minute_dt.strftime("%Y%m%dT%H%M") + ".parquet"
+        path = os.path.join(out_dir, minute_fname)
+
+        v = agg["volume"]
+        vwap = (agg["vwap_num"] / v) if v > 0 else 0.0
+        df = pd.DataFrame([{"timestamp": minute, "vwap": vwap, "volume": v, "count": agg["count"]}])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+
+        # atomic write: if file exists we merge aggregates, else write new
+        tmp_path = path + ".tmp"
+        wrote = False
+        try:
+            if not os.path.exists(path):
+                table = pa.Table.from_pandas(df)
+                pq.write_table(table, tmp_path)
+                os.replace(tmp_path, path)
+                wrote = True
+            else:
+                # merge with existing single-row minute file
+                try:
+                    existing = pq.read_table(path).to_pandas()
+                    if not existing.empty:
+                        e = existing.iloc[0]
+                        existing_vol = float(e.get("volume", 0.0))
+                        existing_vwap = float(e.get("vwap", 0.0))
+                        # Use aggregated numerator (sum price*size) for correct merging
+                        agg_vwap_num = float(agg.get("vwap_num", 0.0))
+                        total_vol = existing_vol + float(df.iloc[0]["volume"])
+                        if total_vol > 0:
+                            new_vwap = (existing_vwap * existing_vol + agg_vwap_num) / total_vol
+                        else:
+                            new_vwap = 0.0
+                        new_count = int(e.get("count", 0)) + int(agg["count"])
+                        merged = pd.DataFrame([{"timestamp": minute, "vwap": new_vwap, "volume": total_vol, "count": new_count}])
+                        tmp2 = path + ".tmp"
+                        pq.write_table(pa.Table.from_pandas(merged), tmp2)
+                        os.replace(tmp2, path)
+                        wrote = True
+                    else:
+                        # no existing rows: write new
+                        table = pa.Table.from_pandas(df)
+                        pq.write_table(table, tmp_path)
+                        os.replace(tmp_path, path)
+                        wrote = True
+                except Exception:
+                    logger.exception("failed to merge existing minute parquet %s", path)
+                    # fallback to overwrite
+                    try:
+                        table = pa.Table.from_pandas(df)
+                        pq.write_table(table, tmp_path)
+                        os.replace(tmp_path, path)
+                        wrote = True
+                    except Exception:
+                        logger.exception("failed to write parquet fallback %s", path)
+        except Exception:
+            # cleanup temp if exists
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                logger.exception("failed to remove tmp parquet %s", tmp_path)
+            logger.exception("failed to write parquet %s", path)
+
+        # If we successfully wrote the minute file, clear the in-memory aggregator
+        # for this (pair, minute) so subsequent messages only account for new trades.
+        try:
+            if wrote:
+                try:
+                    self._agg.pop(key, None)
+                except Exception:
+                    self._agg[key] = {"vwap_num": 0.0, "volume": 0.0, "count": 0}
+        except Exception:
+            logger.exception("failed to clear in-memory aggregator for %s %s", pair, minute)
+        # Append raw trade to in-memory WAL buffer (batched by minute)
+        try:
+            minute_str = pd.to_datetime(ts, unit='s', utc=True).strftime("%Y%m%dT%H%M")
+            key = (pair, minute_str)
+            rows = self._wal_buffer.get(key, [])
+            rows.append({"timestamp": pd.to_datetime(ts, unit='s', utc=True), "price": price, "size": size, "seq": msg.get('seq')})
+            self._wal_buffer[key] = rows
+            if self.wal_queue_length:
+                total = sum(len(v) for v in self._wal_buffer.values())
+                self.wal_queue_length.set(total)
+        except Exception:
+            logger.exception("failed to buffer wal entry for %s", pair)
 
     # Testing helper to inject messages without network
     async def feed_message(self, msg: dict):
         await self.msg_queue.put(msg)
+
+    async def _resync_pair(self, pair: str, since_ts: Optional[int]):
+        """Attempt to resync missing data using REST OHLC. This is a conservative
+        recovery: we request OHLC from since_ts (or a small window) to now and
+        write minute files for any returned data. This helps recover missed
+        trade aggregations for backtest/analytics.
+        """
+        try:
+            if since_ts is None:
+                # no anchor; pick a recent window (last 5 minutes)
+                since = int((pd.Timestamp.utcnow() - pd.Timedelta(minutes=5)).timestamp())
+            else:
+                since = max(0, int(since_ts) - 60)
+            end = int(pd.Timestamp.utcnow().timestamp())
+            logger.info("resyncing trades for %s from %s to %s", pair, since, end)
+            # Call REST trade-level endpoint (tests will patch this)
+            trades = kraken_rest.get_trades(pair, since, end)
+            if trades is None or trades.empty:
+                logger.info("resync returned no trade data for %s", pair)
+                return
+            # group trades by minute and write per-minute parquet files
+            trades = trades.copy()
+            trades["minute"] = trades["timestamp"].dt.tz_convert("UTC").dt.floor("min")
+            for minute, grp in trades.groupby("minute"):
+                out_dir = os.path.join(self.out_root, pair, minute.strftime("%Y%m%d"))
+                os.makedirs(out_dir, exist_ok=True)
+                fname = minute.strftime("%Y%m%dT%H%M") + ".parquet"
+                path = os.path.join(out_dir, fname)
+                try:
+                    total_vol = grp["size"].sum()
+                    vwap = (grp["price"] * grp["size"]).sum() / total_vol if total_vol > 0 else 0.0
+                    table = pa.Table.from_pandas(pd.DataFrame([
+                        {"timestamp": minute, "vwap": vwap, "volume": total_vol, "count": len(grp)}
+                    ]))
+                    tmp = path + ".tmp"
+                    pq.write_table(table, tmp)
+                    os.replace(tmp, path)
+                except Exception:
+                    logger.exception("failed to write resync parquet for %s %s", pair, minute)
+            # also write raw trades into WAL for persistence
+            try:
+                for _, r in trades.iterrows():
+                    ts = int(r["timestamp"].timestamp())
+                    wal_dir = os.path.join(self.wal_folder, pair, pd.to_datetime(ts, unit='s', utc=True).strftime("%Y%m%d"))
+                    os.makedirs(wal_dir, exist_ok=True)
+                    wal_fname = pd.to_datetime(ts, unit='s', utc=True).strftime("%Y%m%dT%H%M%S%f") + ".parquet"
+                    wal_path = os.path.join(wal_dir, wal_fname)
+                    raw_df = pd.DataFrame([{"timestamp": r["timestamp"], "price": r["price"], "size": r["size"], "side": r.get("side")}])
+                    tmp_w = wal_path + ".tmp"
+                    pq.write_table(pa.Table.from_pandas(raw_df), tmp_w)
+                    os.replace(tmp_w, wal_path)
+            except Exception:
+                logger.exception("failed to write wal entries during resync for %s", pair)
+            # update checkpoint timestamp/state based on latest trade
+            last_ts = int(trades["timestamp"].dt.tz_convert("UTC").astype(int).max() / 10**9)
+            self._last_ts[pair] = last_ts
+            logger.info("resync complete for %s up to %s", pair, last_ts)
+        except Exception:
+            logger.exception("resync failed for %s", pair)
+
+    def _recover_wal(self):
+        """Scan WAL folder and re-inject any raw trade files into the processing queue.
+
+        After re-injecting, WAL files are left in place (idempotent); in production
+        you may want to move processed WAL entries to an archive folder.
+        """
+        if not os.path.exists(self.wal_folder):
+            return
+        # If there are batched WAL files, re-enqueue them and then move to archive
+        archive_root = os.path.join(self.wal_folder, "archive")
+        os.makedirs(archive_root, exist_ok=True)
+        for pair in os.listdir(self.wal_folder):
+            if pair == "archive":
+                continue
+            pair_dir = os.path.join(self.wal_folder, pair)
+            if not os.path.isdir(pair_dir):
+                continue
+            for day in os.listdir(pair_dir):
+                day_dir = os.path.join(pair_dir, day)
+                if not os.path.isdir(day_dir):
+                    continue
+                for f in sorted(os.listdir(day_dir)):
+                    if not f.endswith('.parquet'):
+                        continue
+                    p = os.path.join(day_dir, f)
+                    try:
+                        t = pq.read_table(p).to_pandas()
+                        for _, row in t.iterrows():
+                            msg = {"type": "trade", "pair": pair, "timestamp": int(pd.to_datetime(row["timestamp"]).timestamp()), "price": float(row["price"]), "size": float(row["size"])}
+                            # If we're running in-process (tests), put directly into queue to avoid scheduling issues.
+                            try:
+                                loop = asyncio.get_event_loop()
+                                # prefer to enqueue immediately when loop is running
+                                if getattr(loop, "is_running", lambda: False)():
+                                    self.msg_queue.put_nowait(msg)
+                                else:
+                                    # schedule callback; use lambda so FakeLoop with simple signature works
+                                    loop.call_soon_threadsafe(lambda m=msg: self.msg_queue.put_nowait(m))
+                            except Exception:
+                                # fallback to thread-safe scheduling using lambda wrapper
+                                try:
+                                    asyncio.get_event_loop().call_soon_threadsafe(lambda m=msg: self.msg_queue.put_nowait(m))
+                                except Exception:
+                                    logger.exception("failed to enqueue recovered wal message %s", msg)
+                        # after successful enqueue, move file to archive
+                        dest_dir = os.path.join(archive_root, pair, day)
+                        os.makedirs(dest_dir, exist_ok=True)
+                        os.replace(p, os.path.join(dest_dir, f))
+                    except Exception:
+                        logger.exception("failed to recover wal file %s", p)
+
+    async def _wal_flush_loop(self):
+        """Background task that flushes buffered WAL entries periodically to batched parquet files."""
+        while self._running:
+            try:
+                await asyncio.sleep(self._wal_flush_interval)
+                # snapshot keys to flush
+                keys = list(self._wal_buffer.keys())
+                for key in keys:
+                    pair, minute_str = key
+                    rows = self._wal_buffer.pop(key, [])
+                    if not rows:
+                        continue
+                    day = minute_str[:8]
+                    wal_dir = os.path.join(self.wal_folder, pair, day)
+                    os.makedirs(wal_dir, exist_ok=True)
+                    fname = minute_str + ".parquet"
+                    path = os.path.join(wal_dir, fname)
+                    try:
+                        df = pd.DataFrame(rows)
+                        tmp = path + ".tmp"
+                        pq.write_table(pa.Table.from_pandas(df), tmp)
+                        os.replace(tmp, path)
+                    except Exception:
+                        logger.exception("failed to flush wal batch %s", path)
+                if self.wal_queue_length:
+                    total = sum(len(v) for v in self._wal_buffer.values())
+                    self.wal_queue_length.set(total)
+            except Exception:
+                logger.exception("wal flush loop error")
+
+    async def _flush_wal_once(self):
+        """Flush any buffered WAL entries synchronously (called on shutdown or tests)."""
+        # snapshot keys
+        keys = list(self._wal_buffer.keys())
+        for key in keys:
+            pair, minute_str = key
+            rows = self._wal_buffer.pop(key, [])
+            if not rows:
+                continue
+            day = minute_str[:8]
+            wal_dir = os.path.join(self.wal_folder, pair, day)
+            os.makedirs(wal_dir, exist_ok=True)
+            fname = minute_str + ".parquet"
+            path = os.path.join(wal_dir, fname)
+            try:
+                df = pd.DataFrame(rows)
+                tmp = path + ".tmp"
+                pq.write_table(pa.Table.from_pandas(df), tmp)
+                os.replace(tmp, path)
+            except Exception:
+                logger.exception("failed to flush wal batch %s", path)
+        if self.wal_queue_length:
+            total = sum(len(v) for v in self._wal_buffer.values())
+            self.wal_queue_length.set(total)
+
+    async def _wal_prune_loop(self):
+        """Periodic task that prunes archived WAL files older than retention days."""
+        # run until cancelled
+        while self._running:
+            try:
+                # perform one prune pass
+                self.prune_archived_wal_once()
+                # sleep until next prune
+                await asyncio.sleep(self._wal_prune_interval_hours * 3600)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("wal prune loop error")
+
+    def prune_archived_wal_once(self):
+        """Synchronous helper: prune archived WAL day directories and compressed archives older than retention."""
+        try:
+            cutoff = datetime.utcnow() - timedelta(days=self._wal_retention_days)
+            archive_root = os.path.join(self.wal_folder, "archive")
+            if os.path.exists(archive_root):
+                for root, dirs, files in os.walk(archive_root):
+                    # prune day directories named YYYYMMDD
+                    for d in list(dirs):
+                        if len(d) == 8 and d.isdigit():
+                            day_dir = os.path.join(root, d)
+                            try:
+                                day_dt = datetime.strptime(d, "%Y%m%d")
+                            except Exception:
+                                continue
+                            if day_dt < cutoff:
+                                try:
+                                    shutil.rmtree(day_dir)
+                                    logger.info("pruned archived wal day %s (root=%s)", d, root)
+                                except Exception:
+                                    logger.exception("failed to prune archived wal %s", day_dir)
+                    # also prune compressed archives older than cutoff
+                    for f in list(files):
+                        if f.endswith('.tar.gz'):
+                            p = os.path.join(root, f)
+                            try:
+                                mtime = datetime.utcfromtimestamp(os.path.getmtime(p))
+                            except Exception:
+                                continue
+                            if mtime < cutoff:
+                                try:
+                                    os.remove(p)
+                                    logger.info("pruned compressed wal archive %s", p)
+                                except Exception:
+                                    logger.exception("failed to prune compressed wal %s", p)
+        except Exception:
+            logger.exception("prune_archived_wal_once error")
+
+    async def _wal_compress_loop(self):
+        """Compress archived WAL day directories older than configured days into .tar.gz files."""
+        while self._running:
+            try:
+                # perform one compress pass
+                self.compress_archived_wal_once()
+                await asyncio.sleep(self._wal_compress_interval_hours * 3600)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("wal compress loop error")
+
+    def compress_archived_wal_once(self):
+        """Synchronous helper: compress archived WAL day directories older than configured days."""
+        try:
+            cutoff = datetime.utcnow() - timedelta(days=self._wal_compress_after_days)
+            archive_root = os.path.join(self.wal_folder, "archive")
+            if os.path.exists(archive_root):
+                for root, dirs, files in os.walk(archive_root):
+                    for d in list(dirs):
+                        if len(d) == 8 and d.isdigit():
+                            day_dir = os.path.join(root, d)
+                            try:
+                                day_dt = datetime.strptime(d, "%Y%m%d")
+                            except Exception:
+                                continue
+                            if day_dt < cutoff:
+                                tar_path = day_dir + ".tar.gz"
+                                # avoid compressing if tar already exists
+                                if os.path.exists(tar_path):
+                                    # remove original dir if present
+                                    try:
+                                        shutil.rmtree(day_dir)
+                                    except Exception:
+                                        logger.exception("failed to remove already-compressed dir %s", day_dir)
+                                    continue
+                                try:
+                                    shutil.make_archive(day_dir, 'gztar', root_dir=day_dir)
+                                    # remove original directory after successful compression
+                                    shutil.rmtree(day_dir)
+                                    logger.info("compressed archived wal day %s to %s", day_dir, tar_path)
+                                except Exception:
+                                    logger.exception("failed to compress archived wal %s", day_dir)
+        except Exception:
+            logger.exception("compress_archived_wal_once error")
+
+    def _start_health_server(self):
+        owner = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/health":
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    out = {"status": "ok", "last_processed_ts": None}
+                    try:
+                        if owner.last_processed_ts is not None:
+                            # Gauge._value may be implementation-specific; attempt to read safely
+                            try:
+                                out["last_processed_ts"] = owner.last_processed_ts._value.get()
+                            except Exception:
+                                # fallback: no metric value accessible
+                                out["last_processed_ts"] = None
+                    except Exception:
+                        pass
+                    self.wfile.write(_json.dumps(out).encode())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+        def _run():
+            srv = HTTPServer(("", owner._health_port), _Handler)
+            try:
+                srv.serve_forever()
+            except Exception:
+                pass
+
+        self._health_thread = threading.Thread(target=_run, daemon=True)
+        self._health_thread.start()

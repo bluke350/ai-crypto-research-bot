@@ -1,0 +1,340 @@
+#!/usr/bin/env python3
+"""Incremental online updater for opportunity model (MVP).
+
+Usage (example):
+  python tooling/online_update.py --buffer-root data/online_buffer --model models/opportunity.pkl --out models/opportunity-updated.pkl --min-rows 200
+
+This script is intentionally conservative: it only updates models that provide a `partial_fit` method
+or scikit-learn estimators that support `partial_fit`. For other models, it will exit.
+
+It uses `river`'s ADWIN change detector on validation loss to gate promotions.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+import pickle
+import tempfile
+import json
+
+import numpy as np
+import pandas as pd
+
+try:
+    from river.drift import ADWIN
+except Exception:
+    # Graceful fallback if river isn't installed in the environment.
+    class ADWIN:
+        def __init__(self):
+            self.change_detected = False
+        def update(self, _):
+            return
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_BUFFER_ROOT = ROOT / "data" / "online_buffer"
+
+
+def load_model(path: Path):
+    # Support: pickle scikit-learn models (.pkl) and PyTorch state_dict (.pth)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if path.suffix in ('.pkl', '.pickle'):
+        with open(path, 'rb') as f:
+            return pickle.load(f)
+    if path.suffix in ('.pth', '.pt'):
+        # lazy import torch
+        try:
+            import torch
+            import json
+        except Exception:
+            raise RuntimeError('PyTorch required to load .pth models')
+        # Expect a metadata file alongside the pth
+        meta_path = path.with_suffix('.meta.json')
+        if not meta_path.exists():
+            raise RuntimeError('Missing metadata for PyTorch model: %s' % meta_path)
+        meta = json.loads(meta_path.read_text())
+        arch = meta.get('arch')
+        if arch == 'SimpleNet':
+            # reconstruct the same architecture
+            import torch.nn as nn
+
+            class SimpleNet(nn.Module):
+                def __init__(self, input_dim: int = 3, hidden: int = 16):
+                    super().__init__()
+                    self.net = nn.Sequential(
+                        nn.Linear(input_dim, hidden),
+                        nn.ReLU(),
+                        nn.Linear(hidden, 1),
+                        nn.Sigmoid(),
+                    )
+
+                def forward(self, x):
+                    return self.net(x)
+
+            model = SimpleNet(input_dim=meta.get('input_dim', 3), hidden=meta.get('hidden', 16))
+            state = torch.load(path)
+            model.load_state_dict(state)
+            model.eval()
+            return model
+        raise RuntimeError('Unknown PyTorch arch: %s' % arch)
+    # fallback: attempt to pickle-load
+    with open(path, 'rb') as f:
+        return pickle.load(f)
+
+
+def save_model(obj, path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'wb') as f:
+        pickle.dump(obj, f)
+
+
+def prepare_X_y(df: pd.DataFrame, label_col: str = 'label'):
+    if df.empty:
+        return None, None
+    X = df.drop(columns=[label_col], errors='ignore')
+    if label_col in df.columns:
+        y = df[label_col]
+    else:
+        y = None
+    return X, y
+
+
+def evaluate_predict(model, X: pd.DataFrame, y: pd.Series):
+    # simple binary log-loss as metric if probabilities available, otherwise misclassification
+    if y is None or X is None or X.empty:
+        return None
+    try:
+        # sklearn classifier with predict_proba
+        if hasattr(model, 'predict_proba'):
+            p = model.predict_proba(X)[:, 1]
+            p = np.clip(p, 1e-6, 1 - 1e-6)
+            loss = -np.mean(y * np.log(p) + (1 - y) * np.log(1 - p))
+            return float(loss)
+        # sklearn-like with predict only
+        if hasattr(model, 'predict'):
+            preds = model.predict(X)
+            acc = (preds == y).mean()
+            return float(1 - acc)
+        # PyTorch model (torch.nn.Module)
+        try:
+            import torch
+            if isinstance(model, torch.nn.Module):
+                model.eval()
+                with torch.no_grad():
+                    X_t = torch.tensor(X.values.astype('float32'))
+                    out = model(X_t)
+                    probs = out.squeeze().cpu().numpy()
+                    # if outputs are logits or shape >1, handle accordingly
+                    if probs.ndim > 1 and probs.shape[1] > 1:
+                        # assume softmax-like outputs
+                        from scipy.special import softmax
+                        probs = softmax(probs, axis=1)[:, 1]
+                    # ensure 1D
+                    probs = np.asarray(probs).ravel()
+                    probs = np.clip(probs, 1e-6, 1 - 1e-6)
+                    loss = -np.mean(y * np.log(probs) + (1 - y) * np.log(1 - probs))
+                    return float(loss)
+        except Exception:
+            pass
+    except Exception:
+        return None
+
+
+def try_partial_fit(model, X, y, classes=None, epochs=1):
+    # Try to use partial_fit if available
+    if not hasattr(model, 'partial_fit'):
+        # For PyTorch models, try a tiny fine-tune loop if torch available
+        try:
+            import torch
+            import torch.nn as nn
+            import torch.optim as optim
+        except Exception:
+            return False
+        # Expect a torch.nn.Module
+        if isinstance(model, torch.nn.Module):
+            model.train()
+            X_t = torch.tensor(X.values.astype('float32'))
+            if y is None:
+                return False
+            y_t = torch.tensor(y.values.astype('float32')).unsqueeze(1)
+            opt = optim.Adam(model.parameters(), lr=1e-4)
+            loss_fn = nn.BCELoss()
+            for _ in range(epochs):
+                opt.zero_grad()
+                out = model(X_t)
+                loss = loss_fn(out, y_t)
+                loss.backward()
+                opt.step()
+            model.eval()
+            return True
+        return False
+    for _ in range(epochs):
+        try:
+            if classes is not None:
+                model.partial_fit(X, y, classes=classes)
+            else:
+                model.partial_fit(X, y)
+        except TypeError:
+            # some implementations expect numpy arrays
+            model.partial_fit(X.values, y.values)
+    return True
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser()
+    p.add_argument('--buffer-root', type=Path, default=DEFAULT_BUFFER_ROOT)
+    p.add_argument('--model', type=Path, required=True)
+    p.add_argument('--out', type=Path, required=True)
+    p.add_argument('--min-rows', type=int, default=200)
+    p.add_argument('--label-col', type=str, default='label')
+    p.add_argument('--epochs', type=int, default=1)
+    p.add_argument('--replay-frac', type=float, default=0.2)
+    p.add_argument('--improve-tol', type=float, default=0.001, help='Relative improvement required to promote (e.g. 0.001 = 0.1%%)')
+    p.add_argument('--force-promote', action='store_true', help='Force promotion (for testing)')
+    args = p.parse_args(argv)
+
+    # load buffer data
+    from src.data.online_buffer import sample_recent
+
+    df = sample_recent(max_rows=2000)
+    if df.empty or len(df) < args.min_rows:
+        print('Not enough buffer rows: found', len(df))
+        return 0
+
+    # split into train/val (simple time split)
+    split = int(len(df) * 0.8)
+    train_df = df.iloc[:split].reset_index(drop=True)
+    val_df = df.iloc[split:].reset_index(drop=True)
+
+    X_train, y_train = prepare_X_y(train_df, label_col=args.label_col)
+    X_val, y_val = prepare_X_y(val_df, label_col=args.label_col)
+
+    # load model
+    model = load_model(args.model)
+
+    # baseline evaluation
+    base_metric = evaluate_predict(model, X_val, y_val)
+    print('Base metric (lower is better):', base_metric)
+
+    # prepare classes if possible
+    classes = None
+    if y_train is not None:
+        classes = np.unique(y_train)
+
+    # small replay support: sample a fraction from the head of train
+    replay_n = int(len(train_df) * args.replay_frac)
+    if replay_n > 0 and replay_n < len(train_df):
+        replay_df = train_df.sample(replay_n)
+        X_replay, y_replay = prepare_X_y(replay_df, label_col=args.label_col)
+        if X_replay is not None and y_replay is not None:
+            # append to the end of X_train to mix
+            X_train = pd.concat([X_train, X_replay], ignore_index=True)
+            y_train = pd.concat([y_train, y_replay], ignore_index=True)
+
+    # drop rows with NaNs to avoid sklearn errors (tests may produce small toy datasets)
+    if X_train is not None:
+        before = len(X_train)
+        mask = X_train.notna().all(axis=1)
+        X_train = X_train.loc[mask].reset_index(drop=True)
+        if y_train is not None:
+            y_train = y_train.loc[mask].reset_index(drop=True)
+        after = len(X_train)
+        if after == 0:
+            print('All training rows contain NaNs; skipping update')
+            return 0
+        if after < before:
+            print(f'Dropped {before-after} rows with NaNs from training data')
+
+    # Align numeric features to model expected input size (if available)
+    def align_features(Xdf, model):
+        if Xdf is None:
+            return Xdf
+        Xnum = Xdf.select_dtypes(include=[np.number]).copy()
+        n_features = getattr(model, 'n_features_in_', None)
+        if n_features is not None:
+            cols = list(Xnum.columns)
+            if len(cols) > n_features:
+                Xnum = Xnum.iloc[:, :n_features]
+            elif len(cols) < n_features:
+                # pad with zero columns
+                for i in range(n_features - len(cols)):
+                    Xnum[f'_pad_{i}'] = 0.0
+        return Xnum
+
+    X_train = align_features(X_train, model)
+    X_val = align_features(X_val, model)
+
+    # attempt partial_fit
+    updated = False
+    if try_partial_fit(model, X_train, y_train, classes=classes, epochs=args.epochs):
+        print('Model updated with partial_fit')
+        updated = True
+    else:
+        print('Model does not support partial_fit; skipping incremental update')
+
+    if not updated:
+        return 0
+
+    # evaluate and apply ADWIN gating on validation loss
+    new_metric = evaluate_predict(model, X_val, y_val)
+    print('New metric:', new_metric)
+    if new_metric is None or base_metric is None:
+        print('Could not compute metrics; not promoting')
+        return 0
+
+    # ADWIN monitors whether the metric is improving; we look for a sustained decrease
+    adwin = ADWIN()
+    adwin.update(base_metric)
+    adwin.update(new_metric)
+    # If ADWIN signals change and new_metric < base_metric then accept
+    # decide promotion: require relative improvement unless forced
+    rel_improve = (base_metric - new_metric) / (abs(base_metric) + 1e-12)
+    promote = False
+    if args.force_promote:
+        promote = True
+    else:
+        promote = (rel_improve >= args.improve_tol) and adwin.change_detected
+    if promote:
+        print('Promotion gate passed; saving model to', args.out)
+        save_model(model, args.out)
+        # optionally also upload to S3 if configured
+        try:
+            import boto3
+            s3_bucket = os.environ.get('S3_BUCKET')
+            s3_key = os.environ.get('S3_KEY', 'models/opportunity-online-updated.pkl')
+            if s3_bucket:
+                s3 = boto3.client('s3')
+                s3.upload_file(str(args.out), s3_bucket, s3_key)
+                print('Uploaded updated model to s3://%s/%s' % (s3_bucket, s3_key))
+        except Exception:
+            pass
+        # record metadata into a simple SQLite registry
+        try:
+            import sqlite3, time, subprocess
+            reg_path = ROOT / 'experiments' / 'registry.db'
+            reg_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(reg_path))
+            cur = conn.cursor()
+            cur.execute('''CREATE TABLE IF NOT EXISTS models
+                        (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, metric REAL, timestamp INTEGER, git_commit TEXT)''')
+            # get git commit if available
+            commit = None
+            try:
+                commit = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
+            except Exception:
+                commit = ''
+            cur.execute('INSERT INTO models (path, metric, timestamp, git_commit) VALUES (?,?,?,?)', (str(args.out), float(new_metric), int(time.time()), commit))
+            conn.commit()
+            conn.close()
+            print('Wrote model registry entry to', reg_path)
+        except Exception as e:
+            print('Failed to write registry entry:', e)
+    else:
+        print('Promotion gate failed; not saving model')
+
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

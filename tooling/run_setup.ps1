@@ -26,3 +26,4 @@ Write-Host "Upgrading pip and installing requirements using $py"
 & $py -m pip install -r requirements.txt
 
 Write-Host "Setup complete. Use $py to run commands, e.g. $py -m pytest -q"
+Write-Host "Optional: configure logging by copying logging.conf to the workspace root or set LOG_CFG env var to point to a config file. Example: setx LOG_CFG logging.conf"
