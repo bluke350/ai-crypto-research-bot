@@ -25,6 +25,7 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
+import time
 import altair as alt
 from streamlit_autorefresh import st_autorefresh
 
@@ -40,9 +41,86 @@ def list_runs(root: Path = ARTIFACTS_ROOT):
     return runs
 
 
+def gather_recent_executions(root: Path = ARTIFACTS_ROOT, max_rows: int = 200):
+    """Scan run folders for exec files and return a combined DataFrame of recent executions.
+
+    Returns a DataFrame with a `run_id` column and normalized timestamp, side, size, price.
+    """
+    rows = []
+    runs = list_runs(root)
+    for r in runs:
+        for candidate in ['execs.csv', 'executions.csv', 'exec_log.parquet', 'exec_log.csv', 'execs.parquet', 'executions.parquet']:
+            p = r / candidate
+            if not p.exists():
+                continue
+            try:
+                if p.suffix == '.parquet':
+                    df = pd.read_parquet(p)
+                else:
+                    df = pd.read_csv(p)
+            except Exception:
+                df = None
+            if df is None:
+                continue
+
+            # normalize columns
+            df = df.copy()
+            if 'avg_fill_price' in df.columns:
+                df['price'] = df['avg_fill_price']
+            elif 'exec_price' in df.columns:
+                df['price'] = df['exec_price']
+
+            if 'filled_size' in df.columns:
+                df['size'] = df['filled_size']
+            elif 'requested_size' in df.columns:
+                df['size'] = df['requested_size']
+
+            # timestamp normalization
+            ts_col = None
+            for c in ['timestamp', 'ts', 'time']:
+                if c in df.columns:
+                    ts_col = c
+                    break
+            if ts_col is not None:
+                try:
+                    df[ts_col] = pd.to_datetime(df[ts_col])
+                    df = df.rename(columns={ts_col: 'timestamp'})
+                except Exception:
+                    pass
+
+            # add run id
+            df['run_id'] = r.name
+            rows.append(df)
+            break
+
+    if not rows:
+        return pd.DataFrame()
+    try:
+        combined = pd.concat(rows, ignore_index=True, sort=False)
+    except Exception:
+        return pd.DataFrame()
+
+    # ensure timestamp column present and sorted
+    if 'timestamp' in combined.columns:
+        try:
+            combined['timestamp'] = pd.to_datetime(combined['timestamp'])
+            combined = combined.sort_values('timestamp', ascending=False)
+        except Exception:
+            pass
+    else:
+        # sort by index as fallback
+        combined = combined.sort_index(ascending=False)
+
+    # pick useful columns
+    preferred = [c for c in ['run_id', 'pair', 'timestamp', 'side', 'size', 'price', 'order_id', 'status'] if c in combined.columns]
+    if not preferred:
+        return combined.head(max_rows)
+    return combined[preferred].head(max_rows)
+
+
 def render_run_preview(run_dir: Path, width: int = 200, height: int = 60):
     """Return an Altair chart (sparkline) for the run by reading small pnl or price series."""
-    result = load_json(run_dir / 'result.json') or {}
+    result = load_result_with_fallback(run_dir)
     pnl = result.get('pnl') or []
     if pnl:
         try:
@@ -80,6 +158,81 @@ def load_json(p: Path) -> Optional[dict]:
         return json.loads(p.read_text(encoding='utf-8'))
     except Exception:
         return None
+
+
+def load_result_with_fallback(run_dir: Path) -> dict:
+    """Load result.json if present; otherwise build a minimal result from exec/pnl files."""
+    res = load_json(run_dir / 'result.json') or {}
+    if res:
+        return res
+
+    # Fallback: try exec_log.parquet (PaperBroker) or execs.csv/pnl.csv from run_paper_live
+    exec_df = None
+    for candidate in ['exec_log.parquet', 'executions.parquet', 'execs.parquet', 'execs.csv', 'executions.csv']:
+        p = run_dir / candidate
+        if not p.exists():
+            continue
+        try:
+            if p.suffix == '.parquet':
+                exec_df = pd.read_parquet(p)
+            else:
+                exec_df = pd.read_csv(p)
+            break
+        except Exception:
+            exec_df = None
+
+    if exec_df is not None:
+        res['executions'] = exec_df.to_dict(orient='records')
+        # derive price_series from executions if possible
+        price_col = None
+        for c in ['price', 'avg_fill_price', 'exec_price']:
+            if c in exec_df.columns:
+                price_col = c
+                break
+        if price_col is not None:
+            ts_col = None
+            for c in ['timestamp', 'ts', 'time']:
+                if c in exec_df.columns:
+                    ts_col = c
+                    break
+            if ts_col is not None:
+                try:
+                    ps_df = exec_df[[ts_col, price_col]].dropna().copy()
+                    ps_df[ts_col] = pd.to_datetime(ps_df[ts_col])
+                    res['price_series'] = [[t.isoformat(), float(v)] for t, v in zip(ps_df[ts_col], ps_df[price_col])]
+                except Exception:
+                    pass
+
+    # Fallback: load pnl.csv
+    pnl_path = run_dir / 'pnl.csv'
+    if pnl_path.exists():
+        try:
+            pnl_df = pd.read_csv(pnl_path)
+            if pnl_df.shape[1] >= 2:
+                ts_col = pnl_df.columns[0]
+                val_col = pnl_df.columns[1]
+                pnl_df[ts_col] = pd.to_datetime(pnl_df[ts_col])
+                res['pnl'] = [[t.isoformat(), float(v)] for t, v in zip(pnl_df[ts_col], pnl_df[val_col])]
+            elif pnl_df.shape[1] == 1:
+                val_col = pnl_df.columns[0]
+                res['pnl'] = [[i, float(v)] for i, v in enumerate(pnl_df[val_col])]
+        except Exception:
+            pass
+
+    # Fallback: load price_series.csv
+    price_path = run_dir / 'price_series.csv'
+    if price_path.exists():
+        try:
+            price_df = pd.read_csv(price_path)
+            if price_df.shape[1] >= 2:
+                ts_col = price_df.columns[0]
+                val_col = price_df.columns[1]
+                price_df[ts_col] = pd.to_datetime(price_df[ts_col])
+                res['price_series'] = [[t.isoformat(), float(v)] for t, v in zip(price_df[ts_col], price_df[val_col])]
+        except Exception:
+            pass
+
+    return res
 
 
 def tail_file(p: Path, max_lines: int = 500) -> str:
@@ -217,16 +370,22 @@ def render_price_with_executions(result: dict, width: int | None = None, height:
         # filter out None
         layers = [l for l in layers if l is not None]
         layered = alt.layer(*layers).configure_axis(labelFontSize=11, titleFontSize=12)
-        if width or height:
-            layered = layered.properties(width=width, height=height)
+        if width is not None:
+            layered = layered.properties(width=width)
+        if height is not None:
+            layered = layered.properties(height=height)
         return layered
     if base_chart is not None:
-        if width or height:
-            base_chart = base_chart.properties(width=width, height=height)
+        if width is not None:
+            base_chart = base_chart.properties(width=width)
+        if height is not None:
+            base_chart = base_chart.properties(height=height)
         return base_chart
     if points is not None:
-        if width or height:
-            points = points.properties(width=width, height=height)
+        if width is not None:
+            points = points.properties(width=width)
+        if height is not None:
+            points = points.properties(height=height)
         return points
     return None
 
@@ -234,6 +393,18 @@ def render_price_with_executions(result: dict, width: int | None = None, height:
 def main():
     st.set_page_config(page_title='Paper Live Dashboard', layout='wide')
     st.title('Paper Live — Run Artifacts Dashboard')
+
+    # Global executions across runs
+    try:
+        recent_execs = gather_recent_executions(ARTIFACTS_ROOT, max_rows=300)
+    except Exception:
+        recent_execs = pd.DataFrame()
+    with st.expander('Recent executions (all runs)', expanded=False):
+        if recent_execs is None or recent_execs.empty:
+            st.write('No executions found across runs.')
+        else:
+            # show a compact table and allow sorting/viewing
+            st.dataframe(recent_execs)
 
     runs = list_runs()
     run_map = {r.name: r for r in runs}
@@ -259,15 +430,19 @@ def main():
                     st.session_state['selected_run'] = r.name
 
     # allow selection from session state or manual selectbox
+    if 'selected_run' not in st.session_state and runs:
+        # auto-select latest run for convenience
+        st.session_state['selected_run'] = runs[0].name
     if 'selected_run' in st.session_state and st.session_state['selected_run'] in run_map:
         chosen = st.session_state['selected_run']
 
     st.sidebar.markdown('---')
     st.sidebar.subheader('Refresh / Watch')
     refresh_now = st.sidebar.button('Refresh now')
-    watch = st.sidebar.checkbox('Enable watch (auto-refresh)', value=False)
+    # default to 60s auto-refresh; user can turn off or change interval
+    watch = st.sidebar.checkbox('Enable watch (auto-refresh)', value=True)
     if watch:
-        interval = st.sidebar.number_input('Refresh interval (seconds)', min_value=1, value=10)
+        interval = st.sidebar.number_input('Refresh interval (seconds)', min_value=5, value=60)
         # st_autorefresh returns an incrementing int each time it fires
         _ = st_autorefresh(interval=interval * 1000, limit=None)
 
@@ -281,8 +456,8 @@ def main():
     run_dir = run_map[chosen]
     st.sidebar.markdown(f'Run dir: `{str(run_dir)}`')
 
-    # load artifacts
-    result = load_json(run_dir / 'result.json') or {}
+    # load artifacts (prefer full result.json, otherwise derive from exec/pnl files)
+    result = load_result_with_fallback(run_dir)
     gate_state = load_json(run_dir / 'gate_state.json') or {}
     run_plan = load_json(run_dir / 'run_plan.json') or {}
     summary = load_json(run_dir / 'summary.json') or {}
@@ -313,8 +488,29 @@ def main():
 
         # Run log tailing
         st.subheader('Run log (tail)')
-        log_text = tail_file(run_dir / 'run.log', max_lines=500)
-        st.text_area('Run log (last 500 lines)', value=log_text, height=300)
+        log_path = run_dir / 'run.log'
+        max_lines = st.number_input('Lines to show', min_value=50, max_value=5000, value=500, step=50)
+        follow = st.checkbox('Follow (auto-refresh log)', value=False)
+        if follow:
+            # when following, refresh the page frequently so the log area updates
+            _ = st_autorefresh(interval=2000, limit=None, key=f'log_follow_{run_dir.name}')
+
+        log_text = tail_file(log_path, max_lines=max_lines)
+        st.text_area('Run log (tail)', value=log_text, height=300)
+
+        # manual refresh control for convenience
+        refresh_logs = st.button('Refresh logs')
+        if refresh_logs:
+            # Older/newer Streamlit builds may not expose `experimental_rerun`.
+            # Try to call it; if not available, update query params to force a rerun.
+            try:
+                st.experimental_rerun()
+            except Exception:
+                try:
+                    st.experimental_set_query_params(_rerun=int(time.time()))
+                except Exception:
+                    # Last resort: stop execution (user can manually refresh)
+                    st.stop()
 
     with col2:
         st.subheader('Run summary')
@@ -330,7 +526,7 @@ def main():
     st.sidebar.markdown('---')
     st.sidebar.subheader('Actions')
     if refresh_now:
-        st.experimental_rerun()
+        st.rerun()
 
 
 if __name__ == '__main__':

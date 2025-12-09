@@ -19,6 +19,12 @@ import pandas as pd
 from src.ingestion.providers import kraken_rest
 from src.strategies.moving_average import MovingAverageCrossover
 from src.execution.simulator import Simulator
+try:
+    from src.execution.cost_models import FeeModel, SlippageModel, LatencySampler
+except Exception:
+    FeeModel = None
+    SlippageModel = None
+    LatencySampler = None
 from src.validation.backtester import run_backtest
 from src.ingestion.providers.kraken_paper import PaperBroker
 import asyncio
@@ -53,7 +59,11 @@ def run_backtest_mode(symbol: str, cash: float, minutes: int = 120, short: int =
     prices = df[['timestamp', 'close']].copy().reset_index(drop=True)
     strat = MovingAverageCrossover(short=short, long=long, size=1.0)
     targets = strat.generate_targets(prices)
-    sim = Simulator()
+    # build structured cost models for consistent simulation
+    fee = FeeModel(fixed_fee_pct=None) if FeeModel is not None else None
+    slip = SlippageModel() if SlippageModel is not None else None
+    lat = LatencySampler() if LatencySampler is not None else None
+    sim = Simulator(fee_model=fee, slippage_model=slip, latency_model=lat)
     out = run_backtest(prices, targets, sim, initial_cash=float(cash), sizing_mode='units')
 
     run_id = uuid.uuid4().hex[:8]
@@ -172,8 +182,38 @@ async def run_live_ws(symbol: str, cash: float, short: int = 5, long: int = 20,
     os.makedirs(artifacts_dir, exist_ok=True)
     broker = PaperBroker(run_id=run_id, artifacts_root=os.path.join('experiments', 'artifacts'))
 
-    # keep a time-indexed list of minute-close prices
-    minute_closes = []
+    log_path = os.path.join(artifacts_dir, 'run.log')
+
+    def log(msg: str):
+        line = f"{datetime.utcnow().isoformat()}Z {msg}"
+        print(msg)
+        try:
+            with open(log_path, 'a', encoding='utf-8') as fh:
+                fh.write(line + '\n')
+        except Exception:
+            pass
+
+    # keep a time-indexed list of minute-close prices and pnl snapshots
+    minute_closes = []  # list of (iso_ts, price)
+    pnl_series = []     # list of (iso_ts, portfolio_value)
+
+    def persist_live_state():
+        """Persist incremental price, pnl, and exec logs so the dashboard can render live runs."""
+        try:
+            if minute_closes:
+                pd.DataFrame(minute_closes, columns=['timestamp', 'close']).to_csv(
+                    os.path.join(artifacts_dir, 'price_series.csv'), index=False
+                )
+            if pnl_series:
+                pd.DataFrame(pnl_series, columns=['timestamp', 'value']).to_csv(
+                    os.path.join(artifacts_dir, 'pnl.csv'), index=False
+                )
+            df_exec = broker.get_exec_log()
+            if df_exec is not None and not df_exec.empty:
+                df_exec.to_csv(os.path.join(artifacts_dir, 'execs.csv'), index=False)
+        except Exception:
+            # best-effort persistence; keep running even if write fails
+            pass
 
     uri = "wss://ws.kraken.com"
     sub_msg = json.dumps({"event": "subscribe", "pair": [symbol], "subscription": {"name": "trade"}})
@@ -182,10 +222,10 @@ async def run_live_ws(symbol: str, cash: float, short: int = 5, long: int = 20,
     while True:
         attempts += 1
         try:
-            print(f"connecting to {uri} and subscribing to trades for {symbol} (attempt {attempts})")
+            log(f"connecting to {uri} and subscribing to trades for {symbol} (attempt {attempts})")
             async with websockets.connect(uri, ping_interval=20) as ws:
                 await ws.send(sub_msg)
-                print("subscribed; receiving trades. Press Ctrl-C to stop.")
+                log("subscribed; receiving trades. Press Ctrl-C to stop.")
                 # per-minute aggregator: {minute_str: last_price}
                 current_minute = None
                 last_price_for_minute = None
@@ -214,7 +254,8 @@ async def run_live_ws(symbol: str, cash: float, short: int = 5, long: int = 20,
                                 current_minute = minute_str
                             if minute_str != current_minute:
                                 if last_price_for_minute is not None:
-                                    minute_closes.append((current_minute, last_price_for_minute))
+                                    iso_ts = pd.to_datetime(current_minute, format='%Y%m%dT%H%M').isoformat()
+                                    minute_closes.append((iso_ts, last_price_for_minute))
                                     closes_series = pd.Series([p for _, p in minute_closes], dtype=float)
                                     if len(closes_series) >= long:
                                         prices_df = pd.DataFrame({'timestamp': pd.to_datetime([m for m, _ in minute_closes]), 'close': closes_series.values})
@@ -234,7 +275,11 @@ async def run_live_ws(symbol: str, cash: float, short: int = 5, long: int = 20,
                                                 position += filled if side == 'buy' else -filled
                                             else:
                                                 # log simulated order
-                                                print(f"DRY/SKIP order: side={side} size={size} notional={notional:.2f}")
+                                                log(f"DRY/SKIP order: side={side} size={size} notional={notional:.2f}")
+                                    # record marked-to-market after processing the minute
+                                    portfolio_value = cash + position * last_price_for_minute
+                                    pnl_series.append((iso_ts, portfolio_value))
+                                    persist_live_state()
                                 current_minute = minute_str
                                 last_price_for_minute = price
                             else:
@@ -242,26 +287,21 @@ async def run_live_ws(symbol: str, cash: float, short: int = 5, long: int = 20,
                     else:
                         continue
         except KeyboardInterrupt:
-            print("stopping live run")
+            log("stopping live run")
             break
         except (OSError, Exception) as exc:
-            print(f"live ws connection error: {exc}")
+            log(f"live ws connection error: {exc}")
             # decide whether to retry
             if max_retries and attempts >= max_retries:
-                print("max reconnect attempts reached; exiting")
+                log("max reconnect attempts reached; exiting")
                 break
             backoff = min(max_backoff, 2 ** min(attempts, 10))
-            print(f"reconnecting in {backoff}s (attempt {attempts})")
+            log(f"reconnecting in {backoff}s (attempt {attempts})")
             await asyncio.sleep(backoff)
             continue
         finally:
-            try:
-                df_exec = broker.get_exec_log()
-                if not df_exec.empty:
-                    df_exec.to_csv(os.path.join(artifacts_dir, 'execs.csv'), index=False)
-            except Exception:
-                pass
-            print(f"live broker run complete: artifacts -> {artifacts_dir}")
+            persist_live_state()
+            log(f"live broker run complete: artifacts -> {artifacts_dir}")
 
 
 if __name__ == '__main__':

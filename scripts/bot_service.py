@@ -38,6 +38,11 @@ except Exception:
     AnomalyDetector = None
     ml_rank_universe = None
 
+try:
+    import numpy as np
+except Exception:
+    np = None
+
 ROOT = Path(__file__).resolve().parents[1]
 DATA_RAW = ROOT / "data" / "raw"
 EXAMPLES = ROOT / "examples"
@@ -172,6 +177,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--trade", choices=("disabled", "paper", "live"), default="disabled")
     p.add_argument("--pairs", nargs="*", help="Optional explicit list of pairs to consider")
     p.add_argument("--n-candidates", type=int, default=10)
+    p.add_argument("--max-order-notional", type=float, default=None, help="Override per-order notional cap passed to run_live")
+    p.add_argument("--max-loss", type=float, default=None, help="Override max_loss (drawdown) passed to run_live")
+    p.add_argument("--max-delta-per-tick", type=float, default=None, help="Override max_delta_per_tick passed to run_live")
+    p.add_argument("--adaptive-vol-scale", type=float, default=None, help="Override adaptive_volatility_scale passed to run_live")
+    p.add_argument("--cooldown-secs", type=float, default=None, help="Cooldown seconds after a fill before placing another order")
     args = p.parse_args(argv)
 
     if args.trade == "live" and not args.execute:
@@ -203,6 +213,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             detector = None
 
     logger.info("Bot starting; execute=%s trade=%s", args.execute, args.trade)
+    # allow operator to override per-order notional via CLI or env var
+    env_max = os.environ.get('BOT_MAX_ORDER_NOTIONAL')
+    default_max_order_notional = float(args.max_order_notional if args.max_order_notional is not None else (env_max if env_max is not None else 100000.0))
+    # allow override of max_loss via CLI or env var
+    env_max_loss = os.environ.get('BOT_MAX_LOSS')
+    default_max_loss = float(args.max_loss if args.max_loss is not None else (env_max_loss if env_max_loss is not None else 10000.0))
     def run_iteration() -> int:
         selector_path = ROOT / "experiments" / "pair_selection.json"
         pairs: List[str] = []
@@ -375,8 +391,121 @@ def main(argv: Optional[List[str]] = None) -> int:
                     logger.exception("Failed to import orchestration.paper_live: %s", e)
                     return 1
 
+                # track background live runner processes by pair so the live bot remains continuous
+                if not hasattr(run_iteration, '_live_procs'):
+                    setattr(run_iteration, '_live_procs', {})
+                live_procs: Dict[str, subprocess.Popen] = getattr(run_iteration, '_live_procs')
+
+                # helper: compute automatic run params based on recent price volatility and historic exec rates
+                def compute_auto_params(pair: str, prices_csv: Path) -> Tuple[float, float, float]:
+                    """Return (max_delta_per_tick, adaptive_vol_scale, cooldown_secs).
+
+                    Heuristics:
+                    - max_delta scales with recent price volatility (std of pct returns)
+                    - adaptive_vol_scale nudged by recent execution rate (if low execs -> be more aggressive)
+                    - cooldown increases with volatility and execution frequency
+                    """
+                    # defaults
+                    base_max_delta = 1.0
+                    base_adapt = 3.0
+                    base_cd = 5.0
+                    try:
+                        if prices_csv is not None and prices_csv.exists():
+                            dfp = pd.read_csv(prices_csv)
+                            # try to find close column
+                            if 'close' in dfp.columns:
+                                closes = dfp['close'].astype(float).dropna()
+                            else:
+                                # fallback to last numeric column
+                                closes = dfp.select_dtypes(include=['number']).iloc[:, -1].astype(float).dropna()
+                            if len(closes) >= 5:
+                                returns = closes.pct_change().dropna()
+                                vol = float(returns.tail(100).std()) if not returns.empty else 0.0
+                                # compute desired notional per order using portfolio fraction and global cap
+                                try:
+                                    portfolio_cash = float(os.environ.get('BOT_PORTFOLIO_CASH', 1_000_000.0))
+                                except Exception:
+                                    portfolio_cash = 1_000_000.0
+                                try:
+                                    per_order_pct = float(os.environ.get('BOT_ORDER_PCT', 0.01))
+                                except Exception:
+                                    per_order_pct = 0.01
+                                # desired notional is min(global cap, fraction of portfolio)
+                                desired_notional = float(min(float(default_max_order_notional), float(portfolio_cash) * float(per_order_pct)))
+                                # last price (use last close)
+                                last_price = float(closes.iloc[-1]) if len(closes) > 0 else 1.0
+                                if last_price <= 0:
+                                    last_price = 1.0
+                                # base_max_delta expressed in units = desired_notional / price
+                                try:
+                                    base_max_delta = float(desired_notional) / float(last_price)
+                                except Exception:
+                                    base_max_delta = 1.0
+                                # bound the units-based delta to reasonable limits
+                                base_max_delta = float(max(0.01, min(1e6, base_max_delta)))
+                                # set cooldown roughly proportional to volatility
+                                base_cd = float(max(1.0, min(60.0, vol * 100.0 * 10.0)))
+                    except Exception:
+                        logger.debug('auto params: failed to read prices csv for %s', pair)
+
+                    # look for recent artifact runs for this pair to estimate execution rate
+                    exec_rate = 0.0
+                    try:
+                        if ARTIFACTS.exists():
+                            runs = []
+                            for d in sorted(ARTIFACTS.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                                if not d.is_dir():
+                                    continue
+                                rp = d / 'run_plan.json'
+                                if not rp.exists():
+                                    continue
+                                try:
+                                    r = json.loads(rp.read_text(encoding='utf-8'))
+                                    if r.get('pair') == pair:
+                                        runs.append(d)
+                                except Exception:
+                                    continue
+                            if runs:
+                                latest = runs[0]
+                                # read execs.csv if available
+                                exf = latest / 'execs.csv'
+                                psf = latest / 'price_series.csv'
+                                if exf.exists() and psf.exists():
+                                    try:
+                                        nex = sum(1 for _ in open(exf, 'r', encoding='utf-8')) - 1
+                                        nprice = sum(1 for _ in open(psf, 'r', encoding='utf-8')) - 1
+                                        if nprice > 0:
+                                            exec_rate = float(max(0.0, nex)) / float(max(1, nprice))
+                                    except Exception:
+                                        exec_rate = 0.0
+                    except Exception:
+                        exec_rate = 0.0
+
+                    # adjust adaptive scale by exec_rate (if few execs, increase adaptiveness)
+                    adapt = base_adapt
+                    try:
+                        if exec_rate < 0.01:
+                            adapt = min(8.0, adapt * 1.8)
+                        elif exec_rate > 0.05:
+                            adapt = max(1.0, adapt * 0.7)
+                    except Exception:
+                        pass
+
+                    # increase cooldown if exec_rate high
+                    cd = base_cd
+                    try:
+                        if exec_rate > 0.05:
+                            cd = max(cd, 5.0)
+                        if exec_rate < 0.005:
+                            cd = min(cd, 10.0)
+                    except Exception:
+                        pass
+
+                    logger.info('auto params for %s -> max_delta=%.3f adapt=%.3f cooldown=%.1f (vol=%.6f exec_rate=%.4f)', pair, base_max_delta, adapt, cd, locals().get('vol', 0.0), exec_rate)
+                    return float(base_max_delta), float(adapt), float(cd)
+
                 for pair, _ in ranked[: args.top_k]:
-                    logger.info("Starting paper_live for %s (top candidate)", pair)
+                    logger.info("Ensuring continuous paper_live for %s (top candidate)", pair)
                     promoted = None
                     models_dir = ROOT / "models"
                     for f in sorted(models_dir.glob("promoted_*"), key=lambda p: p.stat().st_mtime, reverse=True):
@@ -396,10 +525,45 @@ def main(argv: Optional[List[str]] = None) -> int:
 
                     try:
                         run_root = str(ARTIFACTS)
-                        run_live(checkpoint_path=promoted or '', prices_csv=str(prices_csv), out_root=run_root, pair=pair, paper_mode=True)
-                        logger.info("paper_live completed for %s", pair)
+                        # compute max notional for orders (can be overridden via BOT_MAX_ORDER_NOTIONAL)
+                        max_order_notional = default_max_order_notional
+                        # compute adaptive cap overrides
+                        env_max_delta = os.environ.get('BOT_MAX_DELTA_PER_TICK')
+                        env_adapt = os.environ.get('BOT_ADAPTIVE_VOL_SCALE')
+                        env_cd = os.environ.get('BOT_COOLDOWN_SECS')
+
+                        # if operator did not pass explicit overrides, compute automatic per-pair params
+                        if args.max_delta_per_tick is None and args.adaptive_vol_scale is None and args.cooldown_secs is None:
+                            # compute automatic heuristics
+                            auto_max_delta, auto_adapt, auto_cd = compute_auto_params(pair, csvs.get(pair))
+                            max_delta = auto_max_delta
+                            adaptive_vol_scale = auto_adapt
+                            cooldown_secs = auto_cd
+                        else:
+                            max_delta = float(args.max_delta_per_tick) if args.max_delta_per_tick is not None else (float(env_max_delta) if env_max_delta is not None else 1.0)
+                            adaptive_vol_scale = float(args.adaptive_vol_scale) if args.adaptive_vol_scale is not None else (float(env_adapt) if env_adapt is not None else 2.0)
+                            cooldown_secs = float(args.cooldown_secs) if args.cooldown_secs is not None else (float(env_cd) if env_cd is not None else 0.0)
+                        logger.info('ensuring paper_live (background) for %s with max_order_notional=%s max_loss=%s', pair, max_order_notional, default_max_loss)
+
+                        # if a live runner for this pair already exists and is alive, skip starting another
+                        proc = live_procs.get(pair)
+                        if proc is not None:
+                            rc = proc.poll()
+                            if rc is None:
+                                logger.info('paper_live already running for %s (pid=%s)', pair, getattr(proc, 'pid', None))
+                                continue
+                            else:
+                                logger.info('previous paper_live for %s exited with rc=%s; restarting', pair, rc)
+
+                        # start paper_live as a background subprocess so training/tuning loop can continue
+                        cmd = [sys.executable, '-m', 'orchestration.paper_live', '--ckpt', promoted or '', '--prices-csv', str(prices_csv), '--out-root', str(ARTIFACTS), '--pair', pair, '--flush-interval', str(5), '--max-order-notional', str(max_order_notional), '--max-loss', str(default_max_loss), '--max-delta-per-tick', str(max_delta), '--adaptive-volatility-scale', str(adaptive_vol_scale), '--cooldown-secs', str(cooldown_secs)]
+                        # Run in background, inherit environment so executors can access credentials if present
+                        logger.info('Starting background paper_live: %s', ' '.join(cmd))
+                        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, env=os.environ.copy())
+                        live_procs[pair] = proc
+                        logger.info('started paper_live for %s pid=%s', pair, proc.pid)
                     except Exception as e:
-                        logger.exception("paper_live run failed for %s: %s", pair, e)
+                        logger.exception('failed to start background paper_live for %s: %s', pair, e)
 
         return 0
 

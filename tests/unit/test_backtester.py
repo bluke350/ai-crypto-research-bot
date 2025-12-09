@@ -5,8 +5,18 @@ from src.execution.latency import LatencyModel
 
 
 def make_simulator() -> Simulator:
+    try:
+        from src.execution.cost_models import FeeModel, SlippageModel, LatencySampler
+    except Exception:
+        FeeModel = None
+        SlippageModel = None
+        LatencySampler = None
     lat = LatencyModel(base_ms=10, jitter_ms=5, seed=42)
-    sim = Simulator(latency_model=lat)
+    fee = FeeModel(fixed_fee_pct=0.0) if FeeModel is not None else None
+    slip = SlippageModel(fixed_slippage_pct=0.0) if SlippageModel is not None else None
+    # prefer LatencySampler if available, otherwise use LatencyModel
+    lat_model = LatencySampler(seed=42) if LatencySampler is not None else lat
+    sim = Simulator(fee_model=fee, slippage_model=slip, latency_model=lat_model)
     return sim
 
 

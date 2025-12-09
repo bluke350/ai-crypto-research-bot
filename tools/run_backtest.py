@@ -4,6 +4,12 @@ Usage: python tools/run_backtest.py
 """
 import pandas as pd
 from src.execution.simulator import Simulator
+try:
+    from src.execution.cost_models import FeeModel, SlippageModel, LatencySampler
+except Exception:
+    FeeModel = None
+    SlippageModel = None
+    LatencySampler = None
 from src.validation.backtester import run_backtest
 
 
@@ -14,7 +20,11 @@ def make_price_series(n=60, start_price=100.0):
 
 
 def main():
-    sim = Simulator(rules={"partial_fill_fraction": 0.75, "slippage_daily_vol": 0.3, "slippage_k": 0.05})
+    # prefer structured cost models for reproducible behavior
+    fee = FeeModel(fixed_fee_pct=None) if FeeModel is not None else None
+    slip = SlippageModel(daily_vol=0.3, k=0.05) if SlippageModel is not None else None
+    lat = LatencySampler() if LatencySampler is not None else None
+    sim = Simulator(partial_fill_fraction=0.75, slippage_daily_vol=0.3, slippage_k=0.05, fee_model=fee, slippage_model=slip, latency_model=lat)
     prices = make_price_series()
     # simple target: go to +1 unit at t=10, back to 0 at t=40
     targets = pd.Series([0.0] * len(prices))

@@ -43,6 +43,7 @@ def get_ohlc(pair: str, interval: str, since: int, end: int = None) -> pd.DataFr
     attempts = 0
     max_attempts = cfg.get("retries", {}).get("max_attempts", 5)
     backoffs = cfg.get("retries", {}).get("backoff_ms", [200, 400, 800])
+    import random
     while True:
         rl.sleep_if_needed()
         attempts += 1
@@ -52,7 +53,10 @@ def get_ohlc(pair: str, interval: str, since: int, end: int = None) -> pd.DataFr
         if data.get("error"):
             if attempts >= max_attempts:
                 raise RuntimeError(f"Kraken error: {data.get('error')}")
-            time.sleep(backoffs[min(attempts - 1, len(backoffs) - 1)] / 1000.0)
+            # add jitter to backoff to avoid thundering herd
+            base_ms = backoffs[min(attempts - 1, len(backoffs) - 1)]
+            jitter = random.uniform(0.5, 1.5)
+            time.sleep((base_ms * jitter) / 1000.0)
             continue
         payload = list(data.get("result", {}).values())[0]
         if not payload:
@@ -74,7 +78,8 @@ def get_ohlc(pair: str, interval: str, since: int, end: int = None) -> pd.DataFr
         if prev_since is not None and int(prev_since) == int(last_ts):
             break
         params["since"] = last_ts
-        time.sleep(0.2)
+        # small random sleep to avoid deterministic tight loops
+        time.sleep(0.2 + random.uniform(0.0, 0.1))
     df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume", "count"])
     if df.empty:
         raise ValueError("Empty OHLC response")

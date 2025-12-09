@@ -15,8 +15,21 @@ def test_multiple_fills_per_day_and_partial_fraction():
     # Simulator configured to partially fill only some orders — simulate variability
     from src.execution.simulator import Simulator
 
-    # partial fill 50% for first scenario
-    sim1 = Simulator(rules={"partial_fill_fraction": 0.5})
+    # partial fill 50% for first scenario (partial fill controlled by rules)
+    # use structured slippage model for slippage behavior
+    try:
+        from src.execution.cost_models import SlippageModel, FeeModel, LatencySampler
+    except Exception:
+        SlippageModel = None
+        FeeModel = None
+        LatencySampler = None
+    if SlippageModel is not None:
+        slip1 = SlippageModel(fixed_slippage_pct=None)
+        fee1 = FeeModel(fixed_fee_pct=None) if FeeModel is not None else None
+        lat1 = LatencySampler(seed=1) if LatencySampler is not None else None
+        sim1 = Simulator(partial_fill_fraction=0.5, slippage_model=slip1, fee_model=fee1, latency_model=lat1)
+    else:
+        sim1 = Simulator(partial_fill_fraction=0.5)
     prices = make_price_series(n=4, start_price=100)
     # targets toggle to force multiple orders
     targets = pd.Series([0.0, 2.0, 0.0, 2.0])
@@ -39,7 +52,20 @@ def test_varying_partial_fill_fractions_and_fee_slippage_consistency():
 
     # test multiple fractions
     for frac in (0.25, 0.5, 0.75, 1.0):
-        sim = Simulator(rules={"partial_fill_fraction": frac, "slippage_daily_vol": 0.6, "slippage_k": 0.1})
+        # configure slippage via SlippageModel and keep partial_fill_fraction via rules
+        try:
+            from src.execution.cost_models import SlippageModel, FeeModel, LatencySampler
+        except Exception:
+            SlippageModel = None
+            FeeModel = None
+            LatencySampler = None
+        if SlippageModel is not None:
+            slip = SlippageModel(daily_vol=0.6, k=0.1)
+            fee = FeeModel(fixed_fee_pct=None) if FeeModel is not None else None
+            lat = LatencySampler(seed=1) if LatencySampler is not None else None
+            sim = Simulator(partial_fill_fraction=frac, slippage_model=slip, fee_model=fee, latency_model=lat)
+        else:
+            sim = Simulator(partial_fill_fraction=frac, slippage_daily_vol=0.6, slippage_k=0.1)
         prices = make_price_series(n=3, start_price=200)
         targets = pd.Series([0.0, 1.0, 1.0])
         out = run_backtest(prices, targets, sim)

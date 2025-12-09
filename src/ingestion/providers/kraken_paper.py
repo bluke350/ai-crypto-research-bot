@@ -3,11 +3,24 @@ import uuid
 import os
 import pandas as pd
 from src.execution.simulator import Simulator
+try:
+    from src.execution.cost_models import FeeModel, SlippageModel, LatencySampler
+except Exception:
+    FeeModel = None
+    SlippageModel = None
+    LatencySampler = None
 
 
 class PaperBroker:
     def __init__(self, run_id: str = None, simulator: Simulator = None, out_dir: str = "experiments/runs"):
-        self.sim = simulator or Simulator()
+        # if caller hasn't supplied a Simulator, construct one with structured cost models
+        if simulator is not None:
+            self.sim = simulator
+        else:
+            fee = FeeModel(fixed_fee_pct=None) if FeeModel is not None else None
+            slip = SlippageModel() if SlippageModel is not None else None
+            lat = LatencySampler() if LatencySampler is not None else None
+            self.sim = Simulator(fee_model=fee, slippage_model=slip, latency_model=lat)
         self.run_id = run_id or str(uuid.uuid4())
         self.out_dir = os.path.join(out_dir, self.run_id)
         os.makedirs(self.out_dir, exist_ok=True)

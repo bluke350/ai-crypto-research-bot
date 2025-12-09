@@ -129,4 +129,28 @@ Example usage (training pipeline):
 python -m orchestration.pipelines.training_pipeline --regime-prices-csv examples/XBT_USD_prices.csv --dedupe mean
 ```
 
+## Migration notes: Simulator API
+
+- The `Simulator` constructor now prefers explicit execution parameters instead of an ad-hoc `rules` dict. New args include: `partial_fill_fraction`, `partial_fill_slices`, `book_depth`, `slippage_k`, `slippage_daily_vol`, `maker_bps`, `taker_bps`, `fixed_fee_pct`, and `fixed_slippage_pct`.
+- Structured cost models are preferred: `FeeModel`, `SlippageModel`, and `LatencySampler` (see `src/execution/cost_models.py`).
+- Backwards compatibility: existing callers that pass a `rules` dict will continue to work (fallback), but please update your call sites to use explicit kwargs or structured models.
+
+Quick migration example:
+
+```python
+from src.execution.simulator import Simulator
+from src.execution.cost_models import FeeModel, SlippageModel, LatencySampler
+
+fee = FeeModel(fixed_fee_pct=0.00075)
+slip = SlippageModel(fixed_slippage_pct=0.001)
+lat = LatencySampler(base_ms=10, jitter_ms=2, seed=0)
+
+sim = Simulator(partial_fill_fraction=0.75, partial_fill_slices=4, book_depth=2.0,
+                slippage_k=0.05, slippage_daily_vol=0.30,
+                maker_bps=10, taker_bps=20,
+                fee_model=fee, slippage_model=slip, latency_model=lat, seed=42)
+```
+
+See `docs/SIMULATOR_API.md` in this branch for more details and examples.
+
 

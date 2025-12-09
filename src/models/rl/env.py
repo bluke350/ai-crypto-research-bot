@@ -25,12 +25,16 @@ from src.execution.simulator import Simulator
 
 class SimulatorEnv:
     def __init__(self, pair: str = "XBT/USD", init_price: float = 100.0, init_cash: float = 100000.0,
-                 slippage_rules: Optional[Dict[str, Any]] = None, max_steps: int = 200):
+                 slippage_rules: Optional[Dict[str, Any]] = None, max_steps: int = 200,
+                 fee_model: Optional[object] = None, slippage_model: Optional[object] = None, latency_model: Optional[object] = None):
         self.pair = pair
         self.init_price = float(init_price)
         self.init_cash = float(init_cash)
         self.max_steps = int(max_steps)
         self.slippage_rules = slippage_rules or {}
+        self.fee_model = fee_model
+        self.slippage_model = slippage_model
+        self.latency_model = latency_model
 
         self.sim: Optional[Simulator] = None
         self.price: float = self.init_price
@@ -39,7 +43,25 @@ class SimulatorEnv:
         self.step_count = 0
 
     def reset(self):
-        self.sim = Simulator(rules=self.slippage_rules)
+        # construct Simulator with structured cost models if provided
+        # map any legacy slippage_rules into explicit simulator kwargs
+        sim_kwargs = {}
+        if self.slippage_rules:
+            allowed = (
+                "partial_fill_fraction",
+                "partial_fill_slices",
+                "book_depth",
+                "slippage_k",
+                "slippage_daily_vol",
+                "maker_bps",
+                "taker_bps",
+                "fixed_fee_pct",
+                "fixed_slippage_pct",
+            )
+            for k in allowed:
+                if k in self.slippage_rules:
+                    sim_kwargs[k] = self.slippage_rules[k]
+        self.sim = Simulator(**sim_kwargs, fee_model=self.fee_model, slippage_model=self.slippage_model, latency_model=self.latency_model)
         self.price = float(self.init_price)
         self.position = 0.0
         self.cash = float(self.init_cash)

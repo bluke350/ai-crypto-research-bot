@@ -13,6 +13,7 @@ from src.utils.config import load_yaml
 from src.utils.io import load_prices_csv
 from src.validation.walk_forward import evaluate_walk_forward
 from src.execution.simulator import Simulator
+from src.execution.position_sizer import VolatilityRiskSizer
 from src.strategies.moving_average import MovingAverageCrossover
 from src.ingestion.providers import kraken_rest
 
@@ -40,6 +41,17 @@ def main():
     p.add_argument("--step", type=int, default=30)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--seeds", type=str, default=None, help="Comma separated seeds to run, e.g. '0,1,2'")
+    p.add_argument("--slippage-pct", type=float, default=None, help="Fixed slippage pct to apply to simulated fills (e.g., 0.001)")
+    p.add_argument("--fee-pct", type=float, default=None, help="Fixed fee pct to apply to simulated fills (e.g., 0.00075)")
+    p.add_argument("--stochastic-costs", action="store_true", help="Enable stochastic slippage/latency so seeds produce divergent cost paths")
+    p.add_argument("--disable-auto-size", action="store_true", help="Disable auto position sizing; interpret strategy outputs as raw units")
+    p.add_argument("--sizer-risk-fraction", type=float, default=0.01, help="Fraction of equity to risk per trade when auto sizing (default 1%)")
+    p.add_argument("--sizer-vol-lookback", type=int, default=30, help="Lookback window for realized vol used in sizing")
+    p.add_argument("--sizer-stop-multiple", type=float, default=1.5, help="Multiple of vol*price to approximate stop distance")
+    p.add_argument("--sizer-max-leverage", type=float, default=2.0, help="Cap notional at this leverage on equity")
+    p.add_argument("--sizer-max-position-fraction", type=float, default=1.0, help="Cap notional at this fraction of equity")
+    p.add_argument("--sizer-lot-size", type=float, default=1e-6, help="Round position units to this lot size")
+    p.add_argument("--sizer-min-notional", type=float, default=0.0, help="Minimum notional to trade when auto sizing")
     p.add_argument("--register", action="store_true", help="Register runs/artifacts in experiments DB")
     p.add_argument("--output", type=str, default="experiments/artifacts")
     args = p.parse_args()
@@ -99,10 +111,47 @@ def main():
         seeds = [int(args.seed)]
 
     all_seed_results = []
+    sizer = None
+    try:
+        if not getattr(args, "disable_auto_size", False):
+            sizer = VolatilityRiskSizer(
+                risk_fraction=float(args.sizer_risk_fraction),
+                vol_lookback=int(args.sizer_vol_lookback),
+                stop_multiple=float(args.sizer_stop_multiple),
+                max_leverage=float(args.sizer_max_leverage),
+                max_position_fraction=float(args.sizer_max_position_fraction),
+                lot_size=float(args.sizer_lot_size),
+                min_notional=float(args.sizer_min_notional),
+            )
+    except Exception:
+        LOG.exception("failed to build position sizer; continuing without auto sizing")
+
+    from src.execution.cost_models import FeeModel, SlippageModel, LatencySampler
+
     for s in seeds:
-        # simulator factory per-seed
-        sim_factory = lambda seed=s: Simulator(seed=seed)
-        res = evaluate_walk_forward(prices=prices, targets=None, simulator=sim_factory, window=args.window, step=args.step, strategy_factory=strategy_factory)
+        # build rules from CLI flags
+        rules = {}
+        # build cost models per-seed
+        fee_model = None
+        slippage_model = None
+        latency_sampler = LatencySampler(seed=int(s))
+        if getattr(args, 'stochastic_costs', False):
+            # stochastic slippage around a base level to create per-seed divergence
+            base_slip = float(args.slippage_pct) if getattr(args, 'slippage_pct', None) is not None else None
+            sigma = float(os.environ.get('STOCHASTIC_SLIP_SIGMA', 0.25))
+            mu = float(os.environ.get('STOCHASTIC_SLIP_MU', 0.0))
+            slippage_model = SlippageModel(fixed_slippage_pct=base_slip, stochastic_sigma=sigma, stochastic_mu=mu, seed=int(s))
+            if getattr(args, 'fee_pct', None) is not None:
+                fee_model = FeeModel(fixed_fee_pct=float(args.fee_pct))
+        else:
+            if getattr(args, 'slippage_pct', None) is not None:
+                slippage_model = SlippageModel(fixed_slippage_pct=float(args.slippage_pct), seed=int(s))
+            if getattr(args, 'fee_pct', None) is not None:
+                fee_model = FeeModel(fixed_fee_pct=float(args.fee_pct))
+
+        # simulator factory per-seed using structured cost models
+        sim_factory = lambda seed=s, fm=fee_model, sm=slippage_model, ls=latency_sampler: Simulator(fee_model=fm, slippage_model=sm, latency_model=ls, seed=seed)
+        res = evaluate_walk_forward(prices=prices, targets=None, simulator=sim_factory, window=args.window, step=args.step, strategy_factory=strategy_factory, sizer=sizer)
         # aggregate fold-level metrics into per-seed summary
         folds = res.get("folds", [])
         final_vals = [f.get("metrics", {}).get("final_value", 0.0) for f in folds]
