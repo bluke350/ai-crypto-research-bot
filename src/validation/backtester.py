@@ -1,10 +1,19 @@
 from __future__ import annotations
 import pandas as pd
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from src.execution.order_models import Order
 
 
-def run_backtest(prices: pd.DataFrame, targets: pd.Series, simulator=None, *, executor=None, initial_cash: float = 1_000_000.0, sizing_mode: str = "units") -> Dict[str, Any]:
+def run_backtest(
+    prices: pd.DataFrame,
+    targets: pd.Series,
+    simulator=None,
+    *,
+    executor=None,
+    initial_cash: float = 1_000_000.0,
+    sizing_mode: str = "units",
+    sizer: Optional[Any] = None,
+) -> Dict[str, Any]:
     """Run a simple backtest that executes market orders to reach target position units.
 
     Parameters
@@ -17,6 +26,9 @@ def run_backtest(prices: pd.DataFrame, targets: pd.Series, simulator=None, *, ex
         Simulator instance with place_order(order, market_price) method.
     initial_cash: float
         Starting cash.
+    sizer: object, optional
+        Optional position sizer with `size(target_signal, price, equity, current_position)` that
+        converts direction/strength targets into unit sizes automatically.
 
     Returns
     -------
@@ -67,14 +79,28 @@ def run_backtest(prices: pd.DataFrame, targets: pd.Series, simulator=None, *, ex
     for idx, row in prices.iterrows():
         price = float(row["close"])
         target = float(targets.iat[idx])
-        delta = target - position
+        equity = cash + position * price
+
+        # optional volatility-aware sizing to reduce manual sizing decisions
+        desired_position = position
+        if sizer is not None:
+            try:
+                if hasattr(sizer, "observe"):
+                    sizer.observe(price)
+                desired_position = float(sizer.size(target_signal=target, price=price, equity=equity, current_position=position))
+            except Exception:
+                desired_position = position
+            delta = desired_position - position
+        else:
+            delta = target - position
+
         if abs(delta) > 1e-12:
-            # Determine order size based on sizing_mode
-            if sizing_mode == "units":
+            # Determine order size based on sizing_mode (ignored when sizer provided)
+            if sizer is not None:
+                order_size = delta
+            elif sizing_mode == "units":
                 order_size = delta
             elif sizing_mode == "notional":
-                # interpret targets as desired notional exposure; convert to units
-                # avoid division by zero
                 order_size = delta / price if price != 0 else 0.0
             else:
                 raise ValueError("unsupported sizing_mode")
@@ -95,12 +121,13 @@ def run_backtest(prices: pd.DataFrame, targets: pd.Series, simulator=None, *, ex
             cash -= (avg_price * filled) + fee
             position += filled
             exec_row = dict(fill)
-            # include requested order metadata so callers/tests can inspect original size/notional
             exec_row["requested_size"] = order_size
             exec_row["requested_notional"] = abs(price * order_size)
             exec_row["side"] = side
             exec_row["is_maker"] = False
             exec_row["timestamp"] = row["timestamp"]
+            exec_row["equity_before"] = equity
+            exec_row["target_position"] = desired_position
             exec_rows.append(exec_row)
 
         # mark-to-market portfolio value

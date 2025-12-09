@@ -13,6 +13,7 @@ from src.utils.config import load_yaml
 from src.validation.walk_forward import evaluate_walk_forward
 from src.tuning.optimizers import BayesianTuner, RandomSearchTuner
 from src.execution.simulator import Simulator
+from src.execution.position_sizer import VolatilityRiskSizer
 from src.models.rl.policy_adapter import RLPolicyStrategy
 from src.ingestion.providers import kraken_rest
 from src.persistence.db import RunLogger
@@ -50,6 +51,14 @@ def main():
     p.add_argument('--output', type=str, default='experiments/artifacts')
     p.add_argument('--per-regime', action='store_true')
     p.add_argument('--register', action='store_true')
+    p.add_argument('--disable-auto-size', action='store_true', help='Disable auto position sizing; interpret strategy outputs as raw units')
+    p.add_argument('--sizer-risk-fraction', type=float, default=0.01)
+    p.add_argument('--sizer-vol-lookback', type=int, default=30)
+    p.add_argument('--sizer-stop-multiple', type=float, default=1.5)
+    p.add_argument('--sizer-max-leverage', type=float, default=2.0)
+    p.add_argument('--sizer-max-position-fraction', type=float, default=1.0)
+    p.add_argument('--sizer-lot-size', type=float, default=1e-6)
+    p.add_argument('--sizer-min-notional', type=float, default=0.0)
     args = p.parse_args()
 
     prices = load_prices(args.prices_csv, args.symbol)
@@ -96,6 +105,21 @@ def main():
         tuner = BayesianTuner(param_space, n_trials=args.n_trials)
 
     sim = lambda: Simulator(seed=0)
+
+    sizer = None
+    try:
+        if not getattr(args, 'disable_auto_size', False):
+            sizer = VolatilityRiskSizer(
+                risk_fraction=float(args.sizer_risk_fraction),
+                vol_lookback=int(args.sizer_vol_lookback),
+                stop_multiple=float(args.sizer_stop_multiple),
+                max_leverage=float(args.sizer_max_leverage),
+                max_position_fraction=float(args.sizer_max_position_fraction),
+                lot_size=float(args.sizer_lot_size),
+                min_notional=float(args.sizer_min_notional),
+            )
+    except Exception:
+        LOG.exception('failed to build position sizer; continuing without auto sizing')
     # run tuning to get best params
     try:
         # prepare a simple strategy_factory wrapper for MovingAverageCrossover to be used by the tuner objective
@@ -103,7 +127,7 @@ def main():
             return __import__('src.strategies.moving_average', fromlist=['MovingAverageCrossover']).MovingAverageCrossover(**p)
 
         def _objective(params):
-            out = evaluate_walk_forward(prices, targets=None, simulator=sim, window=args.window, step=args.step, tuner=None, param_space=None, strategy_factory=ma_factory)
+            out = evaluate_walk_forward(prices, targets=None, simulator=sim, window=args.window, step=args.step, tuner=None, param_space=None, strategy_factory=ma_factory, sizer=sizer)
             # objective: return average final_value across folds (higher better)
             folds = out.get('folds', [])
             if not folds:
@@ -147,7 +171,7 @@ def main():
     for mp in model_paths:
         try:
             strat_fact = lambda **p: RLPolicyStrategy(ckpt_path=mp, **p)
-            out = evaluate_walk_forward(prices, targets=None, simulator=sim, window=args.window, step=args.step, tuner=None, param_space=None, strategy_factory=strat_fact)
+            out = evaluate_walk_forward(prices, targets=None, simulator=sim, window=args.window, step=args.step, tuner=None, param_space=None, strategy_factory=strat_fact, sizer=sizer)
             eval_results[mp] = out
         except Exception:
             LOG.exception('failed to run evaluation for model %s', mp)

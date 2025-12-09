@@ -22,13 +22,17 @@ from src.execution.order_models import Order
 
 
 class ReplayEnv:
-    def __init__(self, prices: pd.DataFrame, pair: str = "XBT/USD", initial_cash: float = 100000.0, seed: Optional[int] = None):
+    def __init__(self, prices: pd.DataFrame, pair: str = "XBT/USD", initial_cash: float = 100000.0, seed: Optional[int] = None,
+                 fee_model: Optional[object] = None, slippage_model: Optional[object] = None, latency_model: Optional[object] = None):
         if "timestamp" not in prices.columns or "close" not in prices.columns:
             raise ValueError("prices must contain 'timestamp' and 'close' columns")
         self.prices = prices.sort_values("timestamp").reset_index(drop=True)
         self.pair = pair
         self.initial_cash = float(initial_cash)
         self.seed = seed
+        self.fee_model = fee_model
+        self.slippage_model = slippage_model
+        self.latency_model = latency_model
 
         self.sim: Optional[Simulator] = None
         self.position = 0.0
@@ -37,7 +41,7 @@ class ReplayEnv:
 
     def reset(self) -> np.ndarray:
         # create fresh deterministic simulator for every episode
-        self.sim = Simulator(seed=self.seed)
+        self.sim = Simulator(seed=self.seed, fee_model=self.fee_model, slippage_model=self.slippage_model, latency_model=self.latency_model)
         self.position = 0.0
         self.cash = float(self.initial_cash)
         self.idx = 0

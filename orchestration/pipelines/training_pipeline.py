@@ -31,6 +31,12 @@ def main():
     p.add_argument("--compute-ensemble-weights", action='store_true', help="Compute ensemble weights from available per-model predictions and val labels if present")
     p.add_argument("--action-scale", type=float, default=1.0)
     p.add_argument("--obs-mode", type=str, default="raw")
+    # cost modeling CLI flags (exposed for reproducible training/eval runs)
+    p.add_argument("--slippage-pct", type=float, default=None, help="Fixed slippage pct to apply to simulated fills (e.g., 0.001)")
+    p.add_argument("--fee-pct", type=float, default=None, help="Fixed fee pct to apply to simulated fills (e.g., 0.00075)")
+    p.add_argument("--stochastic-costs", action="store_true", help="Enable stochastic slippage/latency so seeds produce divergent cost paths")
+    p.add_argument("--latency-base-ms", type=int, default=50, help="Base latency in ms for latency sampler")
+    p.add_argument("--latency-jitter-ms", type=int, default=100, help="Jitter in ms for latency sampler")
     p.add_argument("--regime-enable", action="store_true", help="Enable regime detection from prices CSV")
     p.add_argument("--regime-prices-csv", type=str, default=None, help="CSV path with timestamp and close for regime detection")
     p.add_argument("--regime-window", type=int, default=252, help="Rolling window for regime volatility detection")
@@ -121,6 +127,20 @@ def main():
                         argv_seed[idx+1] = str(s)
                     else:
                         argv_seed.extend(['--seed', str(s)])
+                    # append cost flags so the underlying trainer sees the same cost config
+                    cost_flags = []
+                    if args.slippage_pct is not None:
+                        cost_flags.extend(['--slippage-pct', str(args.slippage_pct)])
+                    if args.fee_pct is not None:
+                        cost_flags.extend(['--fee-pct', str(args.fee_pct)])
+                    if getattr(args, 'stochastic_costs', False):
+                        cost_flags.append('--stochastic-costs')
+                    if getattr(args, 'latency_base_ms', None) is not None:
+                        cost_flags.extend(['--latency-base-ms', str(args.latency_base_ms)])
+                    if getattr(args, 'latency_jitter_ms', None) is not None:
+                        cost_flags.extend(['--latency-jitter-ms', str(args.latency_jitter_ms)])
+                    if cost_flags:
+                        argv_seed.extend(cost_flags)
                     # ensure per-regime save path
                     save_path = args.save
                     base, ext = os.path.splitext(save_path)
@@ -200,6 +220,21 @@ def main():
                     argv_seed[i+1] = save_path
                 else:
                     argv_seed.extend(['--save', save_path])
+                # append cost flags so the underlying trainer sees the same cost config
+                cost_flags = []
+                if args.slippage_pct is not None:
+                    cost_flags.extend(['--slippage-pct', str(args.slippage_pct)])
+                if args.fee_pct is not None:
+                    cost_flags.extend(['--fee-pct', str(args.fee_pct)])
+                if getattr(args, 'stochastic_costs', False):
+                    cost_flags.append('--stochastic-costs')
+                if getattr(args, 'latency_base_ms', None) is not None:
+                    cost_flags.extend(['--latency-base-ms', str(args.latency_base_ms)])
+                if getattr(args, 'latency_jitter_ms', None) is not None:
+                    cost_flags.extend(['--latency-jitter-ms', str(args.latency_jitter_ms)])
+                if cost_flags:
+                    argv_seed.extend(cost_flags)
+
                 prev = list(sys.argv)
                 try:
                     sys.argv = argv_seed

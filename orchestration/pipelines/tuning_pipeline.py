@@ -13,6 +13,7 @@ from src.utils.config import load_yaml
 from src.validation.walk_forward import evaluate_walk_forward
 from src.tuning.optimizers import BayesianTuner
 from src.execution.simulator import Simulator
+from src.execution.position_sizer import VolatilityRiskSizer
 from src.strategies.moving_average import MovingAverageCrossover
 from src.ingestion.providers import kraken_rest
 
@@ -35,6 +36,20 @@ def main():
     p.add_argument("--output", type=str, default="experiments/artifacts")
     p.add_argument("--per-regime", action="store_true", help="Evaluate best params per volatility regime (high/low)")
     p.add_argument("--register", action="store_true", help="Register run and artifacts in experiments DB")
+    p.add_argument("--disable-auto-size", action="store_true", help="Disable auto position sizing; interpret strategy outputs as raw units")
+    p.add_argument("--sizer-risk-fraction", type=float, default=0.01, help="Fraction of equity to risk per trade when auto sizing (default 1%)")
+    p.add_argument("--sizer-vol-lookback", type=int, default=30, help="Lookback window for realized vol used in sizing")
+    p.add_argument("--sizer-stop-multiple", type=float, default=1.5, help="Multiple of vol*price to approximate stop distance")
+    p.add_argument("--sizer-max-leverage", type=float, default=2.0, help="Cap notional at this leverage on equity")
+    p.add_argument("--sizer-max-position-fraction", type=float, default=1.0, help="Cap notional at this fraction of equity")
+    p.add_argument("--sizer-lot-size", type=float, default=1e-6, help="Round position units to this lot size")
+    p.add_argument("--sizer-min-notional", type=float, default=0.0, help="Minimum notional to trade when auto sizing")
+    # cost modeling CLI flags (passed through to Simulator factory)
+    p.add_argument("--slippage-pct", type=float, default=None, help="Fixed slippage pct to apply to simulated fills (e.g., 0.001)")
+    p.add_argument("--fee-pct", type=float, default=None, help="Fixed fee pct to apply to simulated fills (e.g., 0.00075)")
+    p.add_argument("--stochastic-costs", action="store_true", help="Enable stochastic slippage/latency so seeds produce divergent cost paths")
+    p.add_argument("--latency-base-ms", type=int, default=50, help="Base latency in ms for latency sampler")
+    p.add_argument("--latency-jitter-ms", type=int, default=100, help="Jitter in ms for latency sampler")
     args = p.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
@@ -96,9 +111,52 @@ def main():
         size = params.get("size", 1.0)
         return MovingAverageCrossover(short=short, long=long, size=size)
 
-    sim = lambda: Simulator(seed=args.seed)
+    # build a simulator factory that constructs structured cost models per-seed
+    def sim() -> Simulator:
+        try:
+            from src.execution.cost_models import FeeModel, SlippageModel, LatencySampler
+        except Exception:
+            FeeModel = None
+            SlippageModel = None
+            LatencySampler = None
+        fee = None
+        slip = None
+        lat = None
+        if 'FeeModel' in globals() or FeeModel is not None:
+            try:
+                fee = FeeModel(fixed_fee_pct=float(args.fee_pct) if args.fee_pct is not None else None)
+            except Exception:
+                fee = None
+        if 'SlippageModel' in globals() or SlippageModel is not None:
+            try:
+                slip = SlippageModel(fixed_slippage_pct=float(args.slippage_pct) if args.slippage_pct is not None else None,
+                                      stochastic_sigma=0.1 if args.stochastic_costs else 0.0,
+                                      seed=int(args.seed))
+            except Exception:
+                slip = None
+        if 'LatencySampler' in globals() or LatencySampler is not None:
+            try:
+                lat = LatencySampler(base_ms=int(args.latency_base_ms), jitter_ms=int(args.latency_jitter_ms), seed=int(args.seed))
+            except Exception:
+                lat = None
+        return Simulator(seed=args.seed, fee_model=fee, slippage_model=slip, latency_model=lat)
 
-    res = evaluate_walk_forward(prices=prices, targets=None, simulator=sim, window=args.window, step=args.step, tuner=tuner, param_space=param_space, strategy_factory=strategy_factory)
+    sizer = None
+    try:
+        if not getattr(args, "disable_auto_size", False):
+            sizer = VolatilityRiskSizer(
+                risk_fraction=float(args.sizer_risk_fraction),
+                vol_lookback=int(args.sizer_vol_lookback),
+                stop_multiple=float(args.sizer_stop_multiple),
+                max_leverage=float(args.sizer_max_leverage),
+                max_position_fraction=float(args.sizer_max_position_fraction),
+                lot_size=float(args.sizer_lot_size),
+                min_notional=float(args.sizer_min_notional),
+            )
+    except Exception:
+        LOG.exception("failed to build position sizer; continuing without auto sizing")
+
+    res = evaluate_walk_forward(prices=prices, targets=None, simulator=sim, window=args.window, step=args.step, tuner=tuner, param_space=param_space, strategy_factory=strategy_factory, sizer=sizer)
     # if per-regime, evaluate best params per regime and attach to res
     if args.per_regime:
         try:
@@ -111,7 +169,7 @@ def main():
                 if mask.sum() < 10:
                     continue
                 sub = prices.loc[mask.index[mask].tolist()]
-                out = evaluate_walk_forward(prices=sub, targets=None, simulator=sim, window=max(10, args.window//2), step=max(5, args.step//2), tuner=None, param_space=None, strategy_factory=strategy_factory)
+                out = evaluate_walk_forward(prices=sub, targets=None, simulator=sim, window=max(10, args.window//2), step=max(5, args.step//2), tuner=None, param_space=None, strategy_factory=strategy_factory, sizer=sizer)
                 per[int(r)] = out
             res['per_regime'] = per
         except Exception:

@@ -25,6 +25,12 @@ except Exception:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=1000)
+    # cost modeling flags (passed to Simulator/Env)
+    parser.add_argument("--slippage-pct", type=float, default=None, help="Fixed slippage pct to apply to simulated fills (e.g., 0.001)")
+    parser.add_argument("--fee-pct", type=float, default=None, help="Fixed fee pct to apply to simulated fills (e.g., 0.00075)")
+    parser.add_argument("--stochastic-costs", action="store_true", help="Enable stochastic slippage/latency draws")
+    parser.add_argument("--latency-base-ms", type=int, default=50, help="Base latency in ms for latency sampler")
+    parser.add_argument("--latency-jitter-ms", type=int, default=100, help="Jitter in ms for latency sampler")
     parser.add_argument("--replay-pair", type=str, default=None, help="Pair to load from data root for replay (e.g. 'XBT/USD')")
     parser.add_argument("--replay-csv", type=str, default=None, help="CSV file to use as replay price history (overrides data_root/replay_pair)")
     parser.add_argument("--data-root", type=str, default=None, help="Root folder for historical data (default: data/raw)")
@@ -66,7 +72,25 @@ def main():
         if 'close' not in prices.columns:
             raise RuntimeError("replay CSV must contain 'close' column")
         prices = prices[['timestamp', 'close']]
-        env = ReplayEnv(prices, initial_cash=100000.0, seed=args.seed)
+        # build cost model objects for replay env
+        try:
+            from src.execution.cost_models import FeeModel, SlippageModel, LatencySampler
+        except Exception:
+            FeeModel = None
+            SlippageModel = None
+            LatencySampler = None
+        fee = None
+        slip = None
+        lat = None
+        if FeeModel is not None:
+            fee = FeeModel(fixed_fee_pct=float(args.fee_pct) if args.fee_pct is not None else None)
+        if SlippageModel is not None:
+            slip = SlippageModel(fixed_slippage_pct=float(args.slippage_pct) if args.slippage_pct is not None else None,
+                                  stochastic_sigma=0.1 if args.stochastic_costs else 0.0,
+                                  seed=int(args.seed) if args.seed is not None else None)
+        if LatencySampler is not None:
+            lat = LatencySampler(base_ms=int(args.latency_base_ms), jitter_ms=int(args.latency_jitter_ms), seed=int(args.seed) if args.seed is not None else None)
+        env = ReplayEnv(prices, initial_cash=100000.0, seed=args.seed, fee_model=fee, slippage_model=slip, latency_model=lat)
     elif getattr(args, "replay_pair", None):
         if load_price_history is None or ReplayEnv is None:
             raise RuntimeError("replay support requires additional modules (pandas/pyarrow)")
@@ -74,9 +98,43 @@ def main():
         prices = load_price_history(data_root, args.replay_pair)
         if prices.empty:
             raise RuntimeError(f"no price data found for pair {args.replay_pair} under {data_root}")
-        env = ReplayEnv(prices, initial_cash=100000.0, seed=args.seed)
+        try:
+            from src.execution.cost_models import FeeModel, SlippageModel, LatencySampler
+        except Exception:
+            FeeModel = None
+            SlippageModel = None
+            LatencySampler = None
+        fee = None
+        slip = None
+        lat = None
+        if FeeModel is not None:
+            fee = FeeModel(fixed_fee_pct=float(args.fee_pct) if args.fee_pct is not None else None)
+        if SlippageModel is not None:
+            slip = SlippageModel(fixed_slippage_pct=float(args.slippage_pct) if args.slippage_pct is not None else None,
+                                  stochastic_sigma=0.1 if args.stochastic_costs else 0.0,
+                                  seed=int(args.seed) if args.seed is not None else None)
+        if LatencySampler is not None:
+            lat = LatencySampler(base_ms=int(args.latency_base_ms), jitter_ms=int(args.latency_jitter_ms), seed=int(args.seed) if args.seed is not None else None)
+        env = ReplayEnv(prices, initial_cash=100000.0, seed=args.seed, fee_model=fee, slippage_model=slip, latency_model=lat)
     else:
-        env = SimulatorEnv(init_price=100.0, init_cash=100000.0, max_steps=200)
+        try:
+            from src.execution.cost_models import FeeModel, SlippageModel, LatencySampler
+        except Exception:
+            FeeModel = None
+            SlippageModel = None
+            LatencySampler = None
+        fee = None
+        slip = None
+        lat = None
+        if FeeModel is not None:
+            fee = FeeModel(fixed_fee_pct=float(args.fee_pct) if args.fee_pct is not None else None)
+        if SlippageModel is not None:
+            slip = SlippageModel(fixed_slippage_pct=float(args.slippage_pct) if args.slippage_pct is not None else None,
+                                  stochastic_sigma=0.1 if args.stochastic_costs else 0.0,
+                                  seed=int(args.seed) if args.seed is not None else None)
+        if LatencySampler is not None:
+            lat = LatencySampler(base_ms=int(args.latency_base_ms), jitter_ms=int(args.latency_jitter_ms), seed=int(args.seed) if args.seed is not None else None)
+        env = SimulatorEnv(init_price=100.0, init_cash=100000.0, max_steps=200, fee_model=fee, slippage_model=slip, latency_model=lat)
     # If requested, wrap env to interpret actions as relative deltas
     if getattr(args, "action_mode", "absolute") == "relative":
         try:

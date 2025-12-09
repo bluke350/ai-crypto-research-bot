@@ -1,8 +1,8 @@
 {
-  "short": 18,
-  "long": 67,
-  "size": 1.9995830183907684,
-  "vol_filter": false,
-  "vol_window": 52,
-  "vol_threshold": 0.007969562619187612
+    "short": 18,
+    "long": 67,
+    "size": 1.9995830183907684,
+    "vol_filter": false,
+    "vol_window": 52,
+    "vol_threshold": 0.007969562619187612
 }

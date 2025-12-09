@@ -95,7 +95,7 @@ def export_summary_csv(db_path: Path = DB_PATH, out_csv: Path = Path('experiment
         pass
 
 
-def run_inprocess_trader(pair: str, ckpt: str, cash: float, poll_interval: float, conn: Optional[sqlite3.Connection] = None, initial_prices_csv: Optional[str] = None, max_notional: float = 10000.0, use_ws: bool = False, kp: float = 1.0, ki: float = 0.0, kd: float = 0.0, take_profit_pct: float = 0.05, trailing_stop_pct: float = 0.02, max_position_size: float = 2.0, mode: str = 'replay', dry_run: bool = True):
+def run_inprocess_trader(pair: str, ckpt: str, cash: float, poll_interval: float, conn: Optional[sqlite3.Connection] = None, initial_prices_csv: Optional[str] = None, max_notional: float = 10000.0, use_ws: bool = False, kp: float = 1.0, ki: float = 0.0, kd: float = 0.0, take_profit_pct: float = 0.05, trailing_stop_pct: float = 0.02, max_position_size: float = 2.0, mode: str = 'replay', dry_run: bool = True, slippage_pct: float = 0.001, fee_pct: float = 0.00075):
     """Run a lightweight in-process trader that uses ModelWrapper to compute targets
     and PaperBroker to place orders. This is intentionally simple and uses a static
     price series (CSV) which it streams through.
@@ -311,8 +311,12 @@ def run_inprocess_trader(pair: str, ckpt: str, cash: float, poll_interval: float
             if dry_run:
                 order_id = f"dry-{int(time.time()*1000)}"
                 filled = size
-                avg_price = price
-                fee = 0.0
+                # simulate slippage: buys pay higher price, sells receive lower price
+                if side == 'buy':
+                    avg_price = price * (1.0 + float(slippage_pct))
+                else:
+                    avg_price = price * (1.0 - float(slippage_pct))
+                fee = float(fee_pct) * (filled * avg_price)
                 fill = {'filled_size': filled, 'avg_fill_price': avg_price, 'fee': fee, 'order_id': order_id}
             else:
                 fill = broker.place_order(pair, side, size, price=price, type='market')
@@ -350,8 +354,11 @@ def run_inprocess_trader(pair: str, ckpt: str, cash: float, poll_interval: float
                 if dry_run:
                     order_id = f"dry-{int(time.time()*1000)}"
                     filled = size
-                    avg_price = price
-                    fee = 0.0
+                    if side == 'buy':
+                        avg_price = price * (1.0 + float(slippage_pct))
+                    else:
+                        avg_price = price * (1.0 - float(slippage_pct))
+                    fee = float(fee_pct) * (filled * avg_price)
                     fill = {'filled_size': filled, 'avg_fill_price': avg_price, 'fee': fee, 'order_id': order_id}
                 else:
                     fill = broker.place_order(pair, side, size, price=price, type='market')

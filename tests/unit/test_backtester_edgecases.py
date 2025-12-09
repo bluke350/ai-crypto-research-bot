@@ -7,8 +7,17 @@ from src.execution.latency import LatencyModel
 
 
 def make_simulator():
+    try:
+        from src.execution.cost_models import FeeModel, SlippageModel, LatencySampler
+    except Exception:
+        FeeModel = None
+        SlippageModel = None
+        LatencySampler = None
     lat = LatencyModel(base_ms=1, jitter_ms=1, seed=1)
-    return Simulator(latency_model=lat)
+    fee = FeeModel(fixed_fee_pct=0.0) if FeeModel is not None else None
+    slip = SlippageModel(fixed_slippage_pct=0.0) if SlippageModel is not None else None
+    lat_model = LatencySampler(seed=1) if LatencySampler is not None else lat
+    return Simulator(fee_model=fee, slippage_model=slip, latency_model=lat_model)
 
 
 def test_empty_prices_raises():
@@ -51,7 +60,7 @@ def test_partial_fill_respected():
     # set simulator to partially fill orders (50%) via rules
     from src.execution.simulator import Simulator
 
-    sim = Simulator(rules={"partial_fill_fraction": 0.5})
+    sim = Simulator(partial_fill_fraction=0.5)
     times = pd.date_range("2020-01-01", periods=3, freq="D")
     prices = pd.DataFrame({"timestamp": times, "close": [100, 101, 102]})
     targets = pd.Series([0.0, 1.0, 1.0])

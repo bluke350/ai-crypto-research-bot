@@ -166,9 +166,16 @@ class KrakenWSClient:
         try:
             import json as _json
             os.makedirs(os.path.dirname(self.checkpoint_file), exist_ok=True)
+            now = time.time()
+            # debounce frequent writes: only write if 1s passed since last write
+            last = getattr(self, "_last_checkpoint_write", None)
+            if last is not None and (now - float(last)) < float(os.environ.get("WS_CHECKPOINT_DEBOUNCE_S", "1")):
+                # skip write for now
+                return
             with open(self.checkpoint_file + ".tmp", "w") as f:
                 _json.dump(self.checkpoints, f)
             os.replace(self.checkpoint_file + ".tmp", self.checkpoint_file)
+            self._last_checkpoint_write = now
         except Exception:
             logger.exception("failed to save ws checkpoints")
 
@@ -398,18 +405,45 @@ class KrakenWSClient:
         pair = msg.get("pair")
         if seq is not None and pair is not None:
             last = self._last_seq.get(pair)
-            if last is not None and seq != last + 1:
-                # gap detected -> trigger a resync from REST to recover missing data
-                logger.warning("sequence gap for %s: last=%s got=%s", pair, last, seq)
-                # schedule a resync task, passing last known timestamp if available
-                last_ts = self._last_ts.get(pair)
-                asyncio.create_task(self._resync_pair(pair, last_ts))
-            self._last_seq[pair] = seq
-            self.checkpoints[pair] = seq
-            self._save_checkpoints()
+            # drop duplicate or older sequence numbers (idempotency guard)
+            if last is not None and seq <= last:
+                logger.info("duplicate/old seq for %s: last=%s got=%s; ignoring", pair, last, seq)
+                # do not process duplicate/old messages further
+                return
+            else:
+                if last is not None and seq != last + 1:
+                    # gap detected -> trigger a resync from REST to recover missing data
+                    logger.warning("sequence gap for %s: last=%s got=%s", pair, last, seq)
+                    # schedule a resync task, passing last known timestamp if available
+                    last_ts = self._last_ts.get(pair)
+                    asyncio.create_task(self._resync_pair(pair, last_ts))
+                self._last_seq[pair] = seq
+                self.checkpoints[pair] = seq
+                # debounce checkpoint writes (avoid fs churn for high-frequency messages)
+                try:
+                    self._save_checkpoints()
+                except Exception:
+                    logger.exception("failed to save checkpoints after seq update")
 
         # Example: transform trade messages to minute-batched parquet
         if typ == "trade":
+            # Basic schema validation: require timestamp, price, size
+            if not all(k in msg for k in ("timestamp", "price", "size", "pair")):
+                logger.debug("skipping malformed trade message: missing fields %s", msg)
+                return
+            # ensure timestamp is numeric
+            try:
+                tnum = int(float(msg.get("timestamp")))
+            except Exception:
+                logger.debug("skipping malformed trade message: invalid timestamp %s", msg.get("timestamp"))
+                return
+
+            # monotonic timestamp guard: if message timestamp is older than last processed for pair, log and ignore
+            last_ts = self._last_ts.get(msg.get("pair"))
+            if last_ts is not None and tnum < int(last_ts):
+                logger.warning("out-of-order trade for %s: ts=%s last_ts=%s; ignoring", msg.get("pair"), tnum, last_ts)
+                return
+
             await self._checkpoint_trades(msg)
 
     async def _checkpoint_trades(self, msg: dict):
@@ -458,12 +492,52 @@ class KrakenWSClient:
         df = pd.DataFrame([{"timestamp": minute, "vwap": vwap, "volume": v, "count": agg["count"]}])
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
 
-        # atomic write: write to temp file then replace
+        # atomic write: if file exists we merge aggregates, else write new
         tmp_path = path + ".tmp"
+        wrote = False
         try:
-            table = pa.Table.from_pandas(df)
-            pq.write_table(table, tmp_path)
-            os.replace(tmp_path, path)
+            if not os.path.exists(path):
+                table = pa.Table.from_pandas(df)
+                pq.write_table(table, tmp_path)
+                os.replace(tmp_path, path)
+                wrote = True
+            else:
+                # merge with existing single-row minute file
+                try:
+                    existing = pq.read_table(path).to_pandas()
+                    if not existing.empty:
+                        e = existing.iloc[0]
+                        existing_vol = float(e.get("volume", 0.0))
+                        existing_vwap = float(e.get("vwap", 0.0))
+                        # Use aggregated numerator (sum price*size) for correct merging
+                        agg_vwap_num = float(agg.get("vwap_num", 0.0))
+                        total_vol = existing_vol + float(df.iloc[0]["volume"])
+                        if total_vol > 0:
+                            new_vwap = (existing_vwap * existing_vol + agg_vwap_num) / total_vol
+                        else:
+                            new_vwap = 0.0
+                        new_count = int(e.get("count", 0)) + int(agg["count"])
+                        merged = pd.DataFrame([{"timestamp": minute, "vwap": new_vwap, "volume": total_vol, "count": new_count}])
+                        tmp2 = path + ".tmp"
+                        pq.write_table(pa.Table.from_pandas(merged), tmp2)
+                        os.replace(tmp2, path)
+                        wrote = True
+                    else:
+                        # no existing rows: write new
+                        table = pa.Table.from_pandas(df)
+                        pq.write_table(table, tmp_path)
+                        os.replace(tmp_path, path)
+                        wrote = True
+                except Exception:
+                    logger.exception("failed to merge existing minute parquet %s", path)
+                    # fallback to overwrite
+                    try:
+                        table = pa.Table.from_pandas(df)
+                        pq.write_table(table, tmp_path)
+                        os.replace(tmp_path, path)
+                        wrote = True
+                    except Exception:
+                        logger.exception("failed to write parquet fallback %s", path)
         except Exception:
             # cleanup temp if exists
             try:
@@ -472,6 +546,17 @@ class KrakenWSClient:
             except Exception:
                 logger.exception("failed to remove tmp parquet %s", tmp_path)
             logger.exception("failed to write parquet %s", path)
+
+        # If we successfully wrote the minute file, clear the in-memory aggregator
+        # for this (pair, minute) so subsequent messages only account for new trades.
+        try:
+            if wrote:
+                try:
+                    self._agg.pop(key, None)
+                except Exception:
+                    self._agg[key] = {"vwap_num": 0.0, "volume": 0.0, "count": 0}
+        except Exception:
+            logger.exception("failed to clear in-memory aggregator for %s %s", pair, minute)
         # Append raw trade to in-memory WAL buffer (batched by minute)
         try:
             minute_str = pd.to_datetime(ts, unit='s', utc=True).strftime("%Y%m%dT%H%M")
@@ -576,8 +661,22 @@ class KrakenWSClient:
                     try:
                         t = pq.read_table(p).to_pandas()
                         for _, row in t.iterrows():
-                            msg = {"type": "trade", "pair": pair, "timestamp": int(pd.to_datetime(row["timestamp"]).timestamp()), "price": float(row["price"]), "size": float(row["size"]) }
-                            asyncio.get_event_loop().call_soon_threadsafe(lambda m=msg: self.msg_queue.put_nowait(m))
+                            msg = {"type": "trade", "pair": pair, "timestamp": int(pd.to_datetime(row["timestamp"]).timestamp()), "price": float(row["price"]), "size": float(row["size"])}
+                            # If we're running in-process (tests), put directly into queue to avoid scheduling issues.
+                            try:
+                                loop = asyncio.get_event_loop()
+                                # prefer to enqueue immediately when loop is running
+                                if getattr(loop, "is_running", lambda: False)():
+                                    self.msg_queue.put_nowait(msg)
+                                else:
+                                    # schedule callback; use lambda so FakeLoop with simple signature works
+                                    loop.call_soon_threadsafe(lambda m=msg: self.msg_queue.put_nowait(m))
+                            except Exception:
+                                # fallback to thread-safe scheduling using lambda wrapper
+                                try:
+                                    asyncio.get_event_loop().call_soon_threadsafe(lambda m=msg: self.msg_queue.put_nowait(m))
+                                except Exception:
+                                    logger.exception("failed to enqueue recovered wal message %s", msg)
                         # after successful enqueue, move file to archive
                         dest_dir = os.path.join(archive_root, pair, day)
                         os.makedirs(dest_dir, exist_ok=True)

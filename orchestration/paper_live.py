@@ -16,6 +16,8 @@ from src.execution.simulators import ExchangeSimulator
 from src.training.inference import ModelWrapper
 from src.ingestion.providers.kraken_ws import KrakenWSClient
 from src.execution.gating import RiskGate, RiskConfig
+from src.execution.exchange_rules import get_exchange_rules
+import math
 import threading
 import asyncio
 from tooling.structured_logging import setup_structured_logger
@@ -23,6 +25,66 @@ from orchestration.ws_parallel import AsyncWorkerPool
 
 # structured logger per-run will be created when out_dir is known; use module logger
 logger = setup_structured_logger(__name__)
+
+
+class AllocationManager:
+    """Simple allocation/position sizing helper used by the live runner.
+
+    Responsibilities:
+    - Track available cash and current position
+    - Provide an allowed delta (in units) given a proposed delta, current price,
+      per-order notional cap, and an adaptive cap multiplier based on recent volatility.
+    """
+
+    def __init__(self, cash: float, position: float, max_position_abs: float, max_order_notional: float, per_order_pct: float = 0.01):
+        self.cash = float(cash)
+        self.position = float(position)
+        self.max_position_abs = float(max_position_abs)
+        self.max_order_notional = float(max_order_notional)
+        # per_order_pct: fraction of current cash to allow per order (e.g., 0.01 == 1% of cash)
+        try:
+            self.per_order_pct = float(per_order_pct)
+        except Exception:
+            self.per_order_pct = 0.01
+
+    def max_units_by_notional(self, price: float) -> float:
+        """Compute the maximum units allowed by notional size.
+
+        Uses the smaller of the configured `max_order_notional` and a percentage
+        of available cash (`per_order_pct * cash`) to avoid creating orders that
+        are too large for the portfolio or that become tiny fractional quantities
+        for low-priced assets.
+        """
+        if price <= 0:
+            return float('inf')
+        effective_notional = min(float(self.max_order_notional), float(self.cash) * float(self.per_order_pct))
+        # avoid zero effective notional
+        if effective_notional <= 0:
+            return float('inf')
+        return float(effective_notional) / float(price)
+
+    def clamp_to_position_limits(self, desired_delta: float) -> float:
+        # ensure we don't exceed absolute position limit
+        max_add = self.max_position_abs - self.position
+        min_add = -self.max_position_abs - self.position
+        return max(min(desired_delta, max_add), min_add)
+
+    def compute_allowed_delta(self, proposed_delta: float, price: float, adaptive_cap: float) -> float:
+        """Return a delta (units) that's within adaptive_cap (units), notional cap, and position limits."""
+        # cap by adaptive per-tick units
+        capped = proposed_delta
+        if abs(capped) > float(adaptive_cap):
+            capped = float(adaptive_cap) if capped > 0 else -float(adaptive_cap)
+
+        # cap by per-order notional expressed as units
+        notional_max_units = self.max_units_by_notional(price)
+        if abs(capped) > notional_max_units:
+            capped = notional_max_units if capped > 0 else -notional_max_units
+
+        # finally ensure position bounds
+        capped = self.clamp_to_position_limits(capped)
+        return float(capped)
+
 
 # Prometheus metrics (optional)
 try:
@@ -48,7 +110,10 @@ def run_live(checkpoint_path: str,
              max_loss: float = 10000.0,
              target_smoothing_alpha: float = 0.3,
              max_delta_per_tick: float = 1.0,
-             prom_port: int | None = None,) -> str:
+             adaptive_volatility_scale: float = 2.0,
+             cooldown_secs: float = 0.0,
+             prom_port: int | None = None,
+             flush_interval: int = 5,) -> str:
     """Run a paper-mode live streamer using either a CSV file (stream) or synthetic ticks.
 
     This runner processes ticks one-by-one, uses the model to produce a target at each step,
@@ -167,6 +232,8 @@ def run_live(checkpoint_path: str,
     realized_pnl = 0.0
     pnl_history = []
     exec_rows = []
+    # combined execution records (exec_rows + executor.fills) will be stored here
+    executions = []
     smoothed_targets = []
 
     # instantiate risk gate from run parameters
@@ -175,6 +242,9 @@ def run_live(checkpoint_path: str,
 
     # buffer of recent prices for model features
     price_buffer = []
+
+    # cooldown tracker: prevent new orders for `cooldown_secs` seconds after any filled execution
+    last_trade_ts: Optional[float] = None
 
     # If WS requested, start KrakenWSClient in background thread
     kraken_client = None
@@ -298,20 +368,191 @@ def run_live(checkpoint_path: str,
             smoothed = float(target)
         smoothed_targets.append((ts, smoothed))
 
-        # compute delta and send order if needed (cap per-tick change)
+        # compute delta and send order if needed
         delta = smoothed - position
-        # cap delta magnitude to max_delta_per_tick
-        if abs(delta) > float(max_delta_per_tick):
-            capped = float(max_delta_per_tick) if delta > 0 else -float(max_delta_per_tick)
-            run_logger.info('delta capped from %.6f to %.6f (max_delta_per_tick=%.6f)', delta, capped, float(max_delta_per_tick))
-            delta = capped
+        # record an audit rejection if the raw requested notional would exceed per-order cap
+        try:
+            raw_notional = abs((smoothed - position) * float(price))
+            if raw_notional > float(max_order_notional):
+                rej = {'timestamp': ts, 'requested_size': float(smoothed - position), 'side': 'buy' if (smoothed - position) > 0 else 'sell', 'filled_size': 0.0, 'avg_fill_price': float(price), 'fee': 0.0, 'gate_allowed': False, 'gate_reason': f'order_notional_too_large_raw:{raw_notional}'}
+                exec_rows.append(rej)
+                if metrics.get('orders_rejected') is not None:
+                    try:
+                        metrics['orders_rejected'].inc()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # record an audit rejection if the raw requested projected position would exceed max_position
+        try:
+            raw_proj = float(position) + float(smoothed - position)
+            if abs(raw_proj) > float(max_position):
+                rej2 = {'timestamp': ts, 'requested_size': float(smoothed - position), 'side': 'buy' if (smoothed - position) > 0 else 'sell', 'filled_size': 0.0, 'avg_fill_price': float(price), 'fee': 0.0, 'gate_allowed': False, 'gate_reason': f'position_limit_exceeded_raw:projected={raw_proj},max={max_position}'}
+                exec_rows.append(rej2)
+                if metrics.get('orders_rejected') is not None:
+                    try:
+                        metrics['orders_rejected'].inc()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # ----------------------------- adaptive capping -----------------------------
+        # Compute recent volatility (pct returns) from price_buffer when available.
+        # Use it to scale the per-tick cap so the runner can be more aggressive in high-volatility
+        # regimes but still bounded by per-order notional and absolute position limits.
+        try:
+            import numpy as _np
+
+            vol = 0.0
+            if len(price_buffer) >= 3:
+                # compute log/pct returns on last N prices
+                arr = _np.array(price_buffer[-20:], dtype=float)
+                returns = _np.diff(arr) / arr[:-1]
+                vol = float(_np.std(returns))
+        except Exception:
+            vol = 0.0
+
+        # adaptive cap in units: base cap scaled by volatility factor
+        try:
+            adaptive_cap_units = float(max_delta_per_tick) * (1.0 + float(adaptive_volatility_scale) * float(vol))
+        except Exception:
+            adaptive_cap_units = float(max_delta_per_tick)
+
+        # create allocation manager to ensure notional and position bounds are respected
+        # per-order percent can be overridden via env var BOT_ORDER_PCT (e.g., 0.01 = 1% of cash)
+        try:
+            per_order_pct = float(os.environ.get('BOT_ORDER_PCT', 0.01))
+        except Exception:
+            per_order_pct = 0.01
+        alloc = AllocationManager(cash=cash, position=position, max_position_abs=float(max_position), max_order_notional=float(max_order_notional), per_order_pct=per_order_pct)
+
+        # final allowed delta respects adaptive cap, per-order notional and position limits
+        allowed_delta = alloc.compute_allowed_delta(delta, float(price), adaptive_cap_units)
+        if abs(allowed_delta - delta) > 1e-12:
+            run_logger.info('delta adjusted from %.6f to %.6f (adaptive_cap_units=%.6f vol=%.6f notional_cap_units=%.6f)', delta, allowed_delta, adaptive_cap_units, vol, alloc.max_units_by_notional(float(price)))
+        delta = allowed_delta
+        # ---------------------------------------------------------------------------
         if abs(delta) > 1e-12:
+            # enforce cooldown: if we recently executed a trade, skip new orders until cooldown passes
+            now_ts = None
+            try:
+                now_ts = time.time()
+            except Exception:
+                now_ts = None
+            if cooldown_secs and last_trade_ts is not None and now_ts is not None:
+                elapsed = now_ts - float(last_trade_ts)
+                if elapsed < float(cooldown_secs):
+                    # skip placing order due to cooldown
+                    remaining = float(cooldown_secs) - elapsed
+                    run_logger.info('skipping order due to cooldown: %.2fs remaining', remaining)
+                    # record a skipped execution row for auditing
+                    exec_rows.append({'timestamp': ts, 'requested_size': delta, 'side': 'buy' if delta > 0 else 'sell', 'filled_size': 0.0, 'avg_fill_price': float(price), 'fee': 0.0, 'cooldown_skipped': True, 'cooldown_remaining': remaining})
+                    # continue main loop without sending order
+                    # mark to market and continue
+                    value = cash + position * price
+                    pnl_history.append((ts, float(value)))
+                    if metrics.get('portfolio_value') is not None:
+                        try:
+                            metrics['portfolio_value'].set(float(value))
+                        except Exception:
+                            pass
+                    # go to next tick
+                    if sleep_between and stream_delay > 0:
+                        time.sleep(stream_delay)
+                    if max_ticks is not None and (i + 1) >= int(max_ticks):
+                        break
+                    # continue top of loop
+                    continue
             side = 'buy' if delta > 0 else 'sell'
-            order = Order(order_id=f'o{i}', pair=pair, side=side, size=delta, price=None)
+            # compute requested order notional and, if too large, scale the order down to respect max_order_notional
+            requested_size = float(delta)
+            requested_notional = abs(requested_size * float(price))
+            adjusted_size = requested_size
+            max_notional = float(max_order_notional)
+            # If the requested notional exceeds configured per-order cap, record a rejection
+            # (audit) before scaling so callers/tests can observe the attempted over-size.
+            if requested_notional > max_notional and float(price) > 0:
+                # record a rejected execution audit row for the oversized request
+                rej = {'timestamp': ts, 'requested_size': requested_size, 'side': 'buy' if requested_size > 0 else 'sell', 'filled_size': 0.0, 'avg_fill_price': float(price), 'fee': 0.0, 'gate_allowed': False, 'gate_reason': f'order_notional_too_large:{requested_notional}'}
+                exec_rows.append(rej)
+                if metrics.get('orders_rejected') is not None:
+                    try:
+                        metrics['orders_rejected'].inc()
+                    except Exception:
+                        pass
+            if requested_notional > max_notional and float(price) > 0:
+                # scale requested_size down so |size| * price <= max_notional
+                scale = max_notional / float(price)
+                adjusted_size = (scale if requested_size > 0 else -scale)
+                run_logger.info('scaling order size from %.6f to %.6f to respect max_order_notional=%.2f', requested_size, adjusted_size, max_notional)
+
+            # enforce exchange lot size and per-order min notional (dust handling)
+            rules = get_exchange_rules().get(pair)
+            lot = float(getattr(rules, 'lot_size', 0.0) or 0.0)
+            exchange_min_notional = float(getattr(rules, 'min_notional', 0.0) or 0.0)
+            # allow operator overrides via env (e.g., BOT_MIN_NOTIONAL / BOT_DUST_SELL_THRESHOLD)
+            try:
+                env_min_notional = float(os.environ.get('BOT_MIN_NOTIONAL', exchange_min_notional))
+            except Exception:
+                env_min_notional = exchange_min_notional
+            try:
+                dust_threshold = float(os.environ.get('BOT_DUST_SELL_THRESHOLD', 15.0))
+            except Exception:
+                dust_threshold = 15.0
+
+            def _round_to_lot(sz: float, l: float) -> float:
+                if l <= 0:
+                    return sz
+                sign = 1.0 if sz >= 0 else -1.0
+                units = abs(sz)
+                # truncate towards zero to ensure we don't exceed requested units
+                rounded_units = math.floor(units / l) * l
+                return sign * float(rounded_units)
+
+            # apply lot rounding
+            rounded_size = _round_to_lot(adjusted_size, lot)
+
+            # dust-sell: if we're selling and current holding's notional is below threshold, sell entire position
+            try:
+                holding_notional = abs(position) * float(price)
+            except Exception:
+                holding_notional = abs(position) * float(price)
+            if side == 'sell' and holding_notional > 0 and holding_notional < float(dust_threshold):
+                # request sell-all (negate position) and round to lot
+                sell_all = -float(position)
+                sell_all_rounded = _round_to_lot(sell_all, lot)
+                run_logger.info('dust-sell triggered: holding_notional=%.2f < dust_threshold=%.2f; converting sell to sell-all (%.6f -> %.6f)', holding_notional, float(dust_threshold), adjusted_size, sell_all_rounded)
+                rounded_size = sell_all_rounded
+
+            # enforce min notional: if resulting order would be below min notional, skip it
+            final_notional = abs(rounded_size * float(price))
+            min_notional_effective = float(env_min_notional)
+            if final_notional < min_notional_effective or abs(rounded_size) < 1e-12:
+                run_logger.info('skipping order: notional %.4f below min_notional %.2f after rounding (rounded_size=%.6f, price=%.6f)', final_notional, min_notional_effective, rounded_size, float(price))
+                # record a skipped execution row for auditing
+                exec_rows.append({'timestamp': ts, 'requested_size': requested_size, 'side': side, 'filled_size': 0.0, 'avg_fill_price': float(price), 'fee': 0.0, 'min_notional_skipped': True, 'min_notional': min_notional_effective})
+                # mark to market and continue
+                value = cash + position * price
+                pnl_history.append((ts, float(value)))
+                if metrics.get('portfolio_value') is not None:
+                    try:
+                        metrics['portfolio_value'].set(float(value))
+                    except Exception:
+                        pass
+                # optionally sleep and continue
+                if sleep_between and stream_delay > 0:
+                    time.sleep(stream_delay)
+                if max_ticks is not None and (i + 1) >= int(max_ticks):
+                    break
+                continue
+
+            order = Order(order_id=f'o{i}', pair=pair, side=side, size=rounded_size, price=None)
             # risk gate checks (position, per-order notional, daily loss)
             positions = {pair: float(position)}
             allowed, reason = gate.check_order(order, market_price=price, positions=positions, realized_pnl=0.0)
             if not allowed:
+                # If the gate still rejects (e.g., position limit), record as rejected
                 run_logger.warning('order rejected by gate: %s', reason, extra={"order_id": order.order_id})
                 if metrics.get('orders_rejected') is not None:
                     metrics['orders_rejected'].inc()
@@ -324,12 +565,14 @@ def run_live(checkpoint_path: str,
                         metrics['circuit_breaker'].inc()
                     break
             else:
-                # allowed by gate -> execute
+                # allowed by gate -> execute. Pass the adjusted size to executor; keep requested_size for auditing
                 fill = executor.execute(order, market_price=price, is_maker=False)
-                # annotate executed fill with gate info
+                # annotate executed fill with gate info and requested_size
                 try:
                     fill['gate_allowed'] = True
                     fill['gate_reason'] = None
+                    fill['requested_size'] = requested_size
+                    fill['adjusted_size'] = adjusted_size
                 except Exception:
                     pass
             filled = float(fill.get('filled_size', 0.0))
@@ -372,6 +615,12 @@ def run_live(checkpoint_path: str,
                 position += filled
             row = {**dict(fill), 'timestamp': ts, 'requested_size': delta, 'side': side}
             exec_rows.append(row)
+            # update last_trade timestamp when we had a (non-zero) fill
+            try:
+                if abs(filled) > 0:
+                    last_trade_ts = time.time()
+            except Exception:
+                pass
             # update metrics and safety checks
             if metrics.get('orders_executed') is not None:
                 metrics['orders_executed'].inc()
@@ -420,6 +669,39 @@ def run_live(checkpoint_path: str,
         if max_ticks is not None and (i + 1) >= int(max_ticks):
             break
 
+        # Periodically flush CSV artifacts so external viewers (dashboard) can see live updates
+        try:
+            do_flush = False
+            # flush when we had an execution in this tick or every flush_interval ticks
+            if (i % int(max(1, flush_interval))) == 0:
+                do_flush = True
+            # also flush immediately if we executed something this tick (exec_rows appended)
+            if exec_rows and exec_rows[-1].get('timestamp') == ts:
+                do_flush = True
+            if do_flush:
+                try:
+                    import pandas as _pd
+                    # atomic-ish write: write to tmp then move
+                    tmp = out_dir / f'.tmp_price_series_{run_id}.csv'
+                    if price_buffer:
+                        _pd.DataFrame(price_buffer).to_csv(tmp, index=False)
+                        tmp.rename(out_dir / 'price_series.csv')
+                    tmp2 = out_dir / f'.tmp_pnl_{run_id}.csv'
+                    if pnl_history:
+                        _pd.DataFrame(pnl_history, columns=['timestamp', 'portfolio_value']).to_csv(tmp2, index=False)
+                        tmp2.rename(out_dir / 'pnl.csv')
+                    tmp3 = out_dir / f'.tmp_execs_{run_id}.csv'
+                    if executions:
+                        _pd.DataFrame(executions).to_csv(tmp3, index=False)
+                        tmp3.rename(out_dir / 'execs.csv')
+                except Exception:
+                    try:
+                        run_logger.exception('periodic flush failed')
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     # write results
     serial = {'pnl': pnl_history, 'executions': exec_rows}
     # include smoothed targets for debugging/analysis
@@ -435,6 +717,37 @@ def run_live(checkpoint_path: str,
         except Exception:
             run_logger.exception('failed to read executor.fills')
     serial['executions'] = executions
+
+    # Persist executions, pnl and price series as CSVs for dashboard/live inspection
+    try:
+        import pandas as _pd
+        # price series (full tick buffer)
+        try:
+            if price_buffer:
+                _pd.DataFrame(price_buffer).to_csv(out_dir / 'price_series.csv', index=False)
+        except Exception:
+            run_logger.exception('failed to write price_series.csv')
+
+        # pnl history
+        try:
+            if pnl_history:
+                _pd.DataFrame(pnl_history, columns=['timestamp', 'portfolio_value']).to_csv(out_dir / 'pnl.csv', index=False)
+        except Exception:
+            run_logger.exception('failed to write pnl.csv')
+
+        # executions (combined from exec_rows + executor.fills)
+        try:
+            if executions:
+                # normalize to DataFrame where possible
+                _pd.DataFrame(executions).to_csv(out_dir / 'execs.csv', index=False)
+        except Exception:
+            run_logger.exception('failed to write execs.csv')
+    except Exception:
+        # pandas import or write failed
+        try:
+            run_logger.exception('failed to persist CSV artifacts')
+        except Exception:
+            pass
 
     with open(out_dir / 'result.json', 'w', encoding='utf-8') as fh:
         json.dump(serial, fh, indent=2)
@@ -478,6 +791,10 @@ if __name__ == '__main__':
     p.add_argument('--max-position', type=float, default=10.0, help='max absolute position before circuit breaker')
     p.add_argument('--max-order-notional', type=float, default=10000.0, help='max notional per order')
     p.add_argument('--max-loss', type=float, default=10000.0, help='max unrealized loss before circuit breaker')
+    p.add_argument('--flush-interval', type=int, default=5, help='ticks between incremental CSV flushes for live inspection')
+    p.add_argument('--max-delta-per-tick', type=float, default=1.0, help='base max delta (units) per tick')
+    p.add_argument('--adaptive-volatility-scale', type=float, default=2.0, help='how strongly volatility scales per-tick cap')
+    p.add_argument('--cooldown-secs', type=float, default=0.0, help='seconds to wait after a fill before placing another order')
     args = p.parse_args()
     print('running paper live runner...')
     print(run_live(
@@ -495,4 +812,8 @@ if __name__ == '__main__':
         max_position=args.max_position,
         max_order_notional=args.max_order_notional,
         max_loss=args.max_loss,
+        max_delta_per_tick=args.max_delta_per_tick,
+        adaptive_volatility_scale=args.adaptive_volatility_scale,
+        cooldown_secs=args.cooldown_secs,
+        flush_interval=args.flush_interval,
     ))

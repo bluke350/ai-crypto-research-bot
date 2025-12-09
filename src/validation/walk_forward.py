@@ -35,6 +35,7 @@ def evaluate_walk_forward(
     tuner: Optional[Any] = None,
     param_space: Optional[Dict[str, list]] = None,
     strategy_factory: Optional[Callable[..., Any]] = None,
+    sizer: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Perform walk-forward evaluation and optionally tune parameters per-fold.
 
@@ -89,7 +90,7 @@ def evaluate_walk_forward(
 
                 # run backtest on train (allow any trainer-like behavior)
                 try:
-                    run_backtest(f["train"], train_targets, sim)
+                    run_backtest(f["train"], train_targets, sim, sizer=sizer)
                 except Exception:
                     pass
 
@@ -97,7 +98,7 @@ def evaluate_walk_forward(
                 try:
                     strat = strategy_factory(**params)
                     test_targets = strat.generate_targets(f["test"]).loc[f["test"].index]
-                    out = run_backtest(f["test"], test_targets, sim)
+                    out = run_backtest(f["test"], test_targets, sim, sizer=sizer)
                     pnl = out["pnl"]
                     metrics = _evaluate_pnl_metrics(pnl)
                     return float(metrics["sharpe"])
@@ -145,7 +146,7 @@ def evaluate_walk_forward(
             # if alignment fails, leave as-is and let run_backtest raise a helpful error
             pass
 
-        out = run_backtest(f["test"], test_targets, sim)
+        out = run_backtest(f["test"], test_targets, sim, sizer=sizer)
         pnl = out["pnl"]
         metrics = _evaluate_pnl_metrics(pnl)
         results.append({"metrics": metrics, "best_params": best_params, "best_score": best_score})
