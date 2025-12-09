@@ -11,12 +11,11 @@ import numpy as _np
 class Simulator:
     def __init__(
         self,
-        rules: Dict[str, Any] = None,
         fee_model: Optional[FeeModel] = None,
         slippage_model: Optional[SlippageModel] = None,
         latency_model: Optional[LatencySampler] = None,
         seed: Optional[int] = None,
-        # explicit simulator parameters (prefer these over `rules` dict)
+        # explicit simulator parameters
         partial_fill_fraction: float = 1.0,
         partial_fill_slices: int = 1,
         book_depth: float = 1.0,
@@ -27,23 +26,20 @@ class Simulator:
         fixed_fee_pct: Optional[float] = None,
         fixed_slippage_pct: Optional[float] = None,
     ):
-        # backwards-compatible rules mapping: callers may still pass a `rules` dict;
-        # explicit args take precedence, then rules are used as a fallback.
-        self.rules = rules or {}
         self.orders: List[Order] = []
         self.fills: List[Dict[str, Any]] = []
         self.fee_model = fee_model
         self.slippage_model = slippage_model
-        # explicit simulator behavior params
-        self.partial_fill_fraction = float(self.rules.get("partial_fill_fraction", partial_fill_fraction))
-        self.partial_fill_slices = int(self.rules.get("partial_fill_slices", partial_fill_slices))
-        self.book_depth = float(self.rules.get("book_depth", book_depth))
-        self.slippage_k = float(self.rules.get("slippage_k", slippage_k))
-        self.slippage_daily_vol = float(self.rules.get("slippage_daily_vol", slippage_daily_vol))
-        self.maker_bps = int(self.rules.get("maker_bps", maker_bps))
-        self.taker_bps = int(self.rules.get("taker_bps", taker_bps))
-        self.fixed_fee_pct = (self.rules.get("fixed_fee_pct") if self.rules.get("fixed_fee_pct") is not None else fixed_fee_pct)
-        self.fixed_slippage_pct = (self.rules.get("fixed_slippage_pct") if self.rules.get("fixed_slippage_pct") is not None else fixed_slippage_pct)
+        # explicit simulator behavior params (no rules fallback)
+        self.partial_fill_fraction = float(partial_fill_fraction)
+        self.partial_fill_slices = int(partial_fill_slices)
+        self.book_depth = float(book_depth)
+        self.slippage_k = float(slippage_k)
+        self.slippage_daily_vol = float(slippage_daily_vol)
+        self.maker_bps = int(maker_bps)
+        self.taker_bps = int(taker_bps)
+        self.fixed_fee_pct = fixed_fee_pct
+        self.fixed_slippage_pct = fixed_slippage_pct
         # deterministic seed for tests/training when provided
         if seed is not None:
             random.seed(seed)
@@ -80,16 +76,7 @@ class Simulator:
                 if book_depth > 1.0:
                     slippage_pct = slippage_pct / (book_depth ** 0.5)
 
-        # optional stochastic slippage: scale by lognormal draw around a base
-        if "stochastic_slippage_sigma" in self.rules:
-            base = slippage_pct
-            if base == 0.0:
-                base = float(self.rules.get("stochastic_base_slippage_pct", 0.0))
-            mu = float(self.rules.get("stochastic_slippage_mu", 0.0))
-            sigma = float(self.rules.get("stochastic_slippage_sigma", 0.0))
-            if sigma > 0.0:
-                draw = float(_np.random.lognormal(mean=mu, sigma=sigma))
-                slippage_pct = base * draw
+        # stochastic slippage is handled by `SlippageModel` when provided.
         slippage_amt = price * slippage_pct
 
         # adjust fill price by slippage in the adverse direction
