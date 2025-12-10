@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: no-naive-utc
+        name: Ban naive UTC calls
+        entry: python scripts/check_naive_utc.py
+        language: system
+        files: '\.py$'
+        stages: [commit]
