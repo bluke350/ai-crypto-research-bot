@@ -771,10 +771,7 @@ class KrakenWSClient:
                             day_dt = None
                         # debug: log comparison values when pruning
                         logger.debug("prune check: day=%s day_dt=%s cutoff=%s (root=%s)", base, day_dt, cutoff, root)
-                        try:
-                            print(f"PRUNE_CHECK day={base} day_dt={day_dt} cutoff={cutoff} root={root}")
-                        except Exception:
-                            pass
+                        # debug output handled via logger.debug above
                         if day_dt is not None and day_dt < cutoff:
                             try:
                                 shutil.rmtree(day_dir)
@@ -791,10 +788,7 @@ class KrakenWSClient:
                                 continue
                             # debug: log mtime comparison when pruning archives
                             logger.debug("prune archive check: path=%s mtime=%s cutoff=%s", p, mtime, cutoff)
-                            try:
-                                print(f"PRUNE_ARCHIVE_CHECK path={p} mtime={mtime} cutoff={cutoff}")
-                            except Exception:
-                                pass
+                            # debug output handled via logger.debug above
                             if mtime < cutoff:
                                 try:
                                     os.remove(p)
@@ -821,10 +815,7 @@ class KrakenWSClient:
         try:
             cutoff = now_utc() - timedelta(days=self._wal_compress_after_days)
             archive_root = os.path.join(self.wal_folder, "archive")
-            try:
-                print(f"COMPRESS_RUN archive_root={archive_root} exists={os.path.exists(archive_root)} compress_after_days={self._wal_compress_after_days}")
-            except Exception:
-                pass
+            logger.debug("COMPRESS_RUN archive_root=%s exists=%s compress_after_days=%s", archive_root, os.path.exists(archive_root), self._wal_compress_after_days)
             if os.path.exists(archive_root):
                 for root, dirs, files in os.walk(archive_root):
                     # If the current root is a day directory (basename YYYYMMDD), handle it directly.
@@ -837,10 +828,7 @@ class KrakenWSClient:
                             day_dt = None
                         # debug: log comparison values for compression
                         logger.debug("compress check: day=%s day_dt=%s cutoff=%s (root=%s)", base, day_dt, cutoff, root)
-                        try:
-                            print(f"COMPRESS_CHECK day={base} day_dt={day_dt} cutoff={cutoff} root={root}")
-                        except Exception:
-                            pass
+                        # debug output handled via logger.debug above
                         if day_dt is not None and day_dt < cutoff:
                             tar_path = day_dir + ".tar.gz"
                             # avoid compressing if tar already exists
