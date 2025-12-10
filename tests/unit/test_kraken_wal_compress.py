@@ -1,7 +1,7 @@
 import asyncio
 import os
 import shutil
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 import pytest
 from src.ingestion.providers.kraken_ws import KrakenWSClient
@@ -14,7 +14,7 @@ async def test_wal_compress_creates_tar_and_removes_dir(tmp_path):
     os.environ["WS_WAL_COMPRESS_INTERVAL_HOURS"] = "0.001"  # run frequently
 
     client = KrakenWSClient(out_root=str(out))
-    archive_dir = os.path.join(str(out), "_wal", "archive", "XBT/USD", (datetime.utcnow() - timedelta(days=2)).strftime("%Y%m%d"))
+    archive_dir = os.path.join(str(out), "_wal", "archive", "XBT/USD", (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y%m%d"))
     os.makedirs(archive_dir, exist_ok=True)
     # add a dummy file
     with open(os.path.join(archive_dir, "dummy.parquet"), "w") as f:
@@ -40,7 +40,7 @@ async def test_wal_compress_does_not_touch_today(tmp_path):
 
     client = KrakenWSClient(out_root=str(out))
     # today's directory
-    today_dir = os.path.join(str(out), "_wal", "archive", "XBT/USD", datetime.utcnow().strftime("%Y%m%d"))
+    today_dir = os.path.join(str(out), "_wal", "archive", "XBT/USD", datetime.now(timezone.utc).strftime("%Y%m%d"))
     os.makedirs(today_dir, exist_ok=True)
     with open(os.path.join(today_dir, "live.parquet"), "w") as f:
         f.write("live")

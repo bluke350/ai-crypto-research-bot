@@ -9,7 +9,8 @@ This script imports the project's `src` modules (so run from repo root).
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta
+from src.utils.time import now_utc
+from datetime import timedelta
 import os
 import sys
 import traceback
@@ -35,7 +36,7 @@ def main():
     if args.end:
         end_dt = datetime.fromisoformat(args.end)
     else:
-        end_dt = datetime.utcnow()
+        end_dt = now_utc()
     if args.start:
         start_dt = datetime.fromisoformat(args.start)
     else:

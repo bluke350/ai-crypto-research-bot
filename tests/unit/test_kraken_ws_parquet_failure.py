@@ -12,7 +12,7 @@ def test_checkpoint_trades_handles_parquet_write_failure(tmp_path, monkeypatch):
     client = KrakenWSClient(out_root=str(out))
 
     pair = "XBTUSD"
-    ts = int(pd.Timestamp.utcnow().timestamp())
+    ts = int(pd.Timestamp.now(tz="UTC").timestamp())
     msg = {"type": "trade", "pair": pair, "timestamp": ts, "price": 123.45, "size": 0.5, "seq": 10}
 
     # monkeypatch pyarrow.parquet.write_table to raise to exercise the exception branch

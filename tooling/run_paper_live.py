@@ -12,7 +12,8 @@ from __future__ import annotations
 import argparse
 import os
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from src.utils.time import now_utc
 
 import pandas as pd
 
@@ -37,7 +38,7 @@ except Exception:
 
 def fetch_recent_ohlc(symbol: str, minutes: int = 60) -> pd.DataFrame:
     # fetch last `minutes` of 1m bars using get_ohlc; since/end are epoch seconds
-    end = int(pd.Timestamp.utcnow().timestamp())
+    end = int(pd.Timestamp.now(tz="UTC").timestamp())
     since = end - (minutes * 60)
     # kraken_rest.get_ohlc expects interval string like '1m'
     try:
@@ -47,7 +48,7 @@ def fetch_recent_ohlc(symbol: str, minutes: int = 60) -> pd.DataFrame:
         print("kraken REST unavailable or failed (falling back to synthetic data):", exc)
         # synthesize simple OHLC series for minutes back
         # use 'min' instead of deprecated 'T'
-        idx = pd.date_range(end=pd.Timestamp.utcnow().floor('min'), periods=minutes, freq='min', tz='UTC')
+        idx = pd.date_range(end=pd.Timestamp.now(tz="UTC").floor('min'), periods=minutes, freq='min', tz='UTC')
         close = (pd.Series(range(len(idx))) * 0.1 + 20000.0).astype(float)
         df = pd.DataFrame({'timestamp': idx, 'open': close, 'high': close + 1.0, 'low': close - 1.0, 'close': close, 'volume': 1.0, 'count': 1})
         return df
@@ -185,7 +186,7 @@ async def run_live_ws(symbol: str, cash: float, short: int = 5, long: int = 20,
     log_path = os.path.join(artifacts_dir, 'run.log')
 
     def log(msg: str):
-        line = f"{datetime.utcnow().isoformat()}Z {msg}"
+        line = f"{now_utc().isoformat()}Z {msg}"
         print(msg)
         try:
             with open(log_path, 'a', encoding='utf-8') as fh:
@@ -248,7 +249,7 @@ async def run_live_ws(symbol: str, cash: float, short: int = 5, long: int = 20,
                                 ts = float(t[2])
                             except Exception:
                                 continue
-                            dt = datetime.utcfromtimestamp(ts)
+                            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                             minute_str = dt.strftime('%Y%m%dT%H%M')
                             if current_minute is None:
                                 current_minute = minute_str

@@ -13,7 +13,8 @@ import asyncio
 import logging
 import signal
 import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
+from src.utils.time import now_utc
 
 from src.ingestion.providers.kraken_ws import KrakenWSClient
 from tools.gap_fill import gap_fill
@@ -22,7 +23,7 @@ LOG = logging.getLogger(__name__)
 
 
 def _run_gap_fill(out_root: str, symbol: str, lookback_days: int):
-    now = datetime.utcnow()
+    now = now_utc()
     start = now - timedelta(days=lookback_days)
     # align to full days
     start = start.replace(hour=0, minute=0, second=0, microsecond=0)

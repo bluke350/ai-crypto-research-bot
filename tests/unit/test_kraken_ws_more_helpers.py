@@ -1,6 +1,6 @@
 import asyncio
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 import pyarrow as pa
@@ -40,7 +40,7 @@ def test_recover_wal_with_corrupt_parquet_leaves_file(tmp_path):
     out = tmp_path / "data"
     client = KrakenWSClient(out_root=str(out))
     pair = 'XBTUSD'
-    day = datetime.utcnow().strftime('%Y%m%d')
+    day = datetime.now(timezone.utc).strftime('%Y%m%d')
     wal_dir = os.path.join(client.wal_folder, pair, day)
     os.makedirs(wal_dir, exist_ok=True)
 

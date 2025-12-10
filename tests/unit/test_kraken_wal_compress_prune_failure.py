@@ -1,6 +1,6 @@
 import os
 import shutil
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.ingestion.providers.kraken_ws import KrakenWSClient
@@ -10,7 +10,7 @@ def test_compress_handles_shutil_errors(monkeypatch, tmp_path):
     out = tmp_path / "data"
     os.environ["WS_WAL_COMPRESS_DAYS"] = "0"
     client = KrakenWSClient(out_root=str(out))
-    archive_dir = os.path.join(str(out), '_wal', 'archive', 'XBTUSD', (datetime.utcnow() - timedelta(days=2)).strftime('%Y%m%d'))
+    archive_dir = os.path.join(str(out), '_wal', 'archive', 'XBTUSD', (datetime.now(timezone.utc) - timedelta(days=2)).strftime('%Y%m%d'))
     os.makedirs(archive_dir, exist_ok=True)
     # add a dummy file
     with open(os.path.join(archive_dir, 'dummy.parquet'), 'w') as f:
@@ -34,7 +34,7 @@ def test_prune_handles_os_errors(monkeypatch, tmp_path):
     client = KrakenWSClient(out_root=str(out))
     archive_root = os.path.join(str(out), '_wal', 'archive')
     # create a day directory older than retention
-    day = (datetime.utcnow() - timedelta(days=10)).strftime('%Y%m%d')
+    day = (datetime.now(timezone.utc) - timedelta(days=10)).strftime('%Y%m%d')
     day_dir = os.path.join(archive_root, 'XBTUSD', day)
     os.makedirs(day_dir, exist_ok=True)
     with open(os.path.join(day_dir, 'var.parquet'), 'w') as f:

@@ -1,5 +1,7 @@
 import asyncio
 import os
+import asyncio
+import os
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pandas as pd
@@ -14,7 +16,7 @@ def test_wal_flush_handles_write_error(tmp_path, monkeypatch):
 
     pair = "XBTUSD"
     # prepare WAL buffer entry
-    ts = int(pd.Timestamp.utcnow().timestamp())
+    ts = int(pd.Timestamp.now(tz="UTC").timestamp())
     minute_str = pd.to_datetime(ts, unit='s', utc=True).strftime('%Y%m%dT%H%M')
     key = (pair, minute_str)
     client._wal_buffer[key] = [{"timestamp": pd.to_datetime(ts, unit='s', utc=True), "price": 100.0, "size": 1.0}]

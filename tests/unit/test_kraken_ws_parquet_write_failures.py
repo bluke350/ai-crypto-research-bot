@@ -3,6 +3,11 @@ import os
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
+import asyncio
+import os
+import pandas as pd
+import pyarrow.parquet as pq
+import pytest
 import types
 
 from src.ingestion.providers.kraken_ws import KrakenWSClient
@@ -13,7 +18,7 @@ def test_checkpoint_trades_parquet_write_raises(monkeypatch, tmp_path):
     client = KrakenWSClient(out_root=str(out))
 
     pair = "XBTUSD"
-    ts = int(pd.Timestamp.utcnow().timestamp())
+    ts = int(pd.Timestamp.now(tz="UTC").timestamp())
     msg = {"type": "trade", "pair": pair, "timestamp": ts, "price": 123.45, "size": 0.5, "seq": 10}
 
     # monkeypatch pq.write_table to raise an exception to simulate an I/O error

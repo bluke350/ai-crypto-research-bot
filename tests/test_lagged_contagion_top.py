@@ -22,3 +22,4 @@ def test_build_lagged_features_output():
     feats = build_lagged_features(base, {'other': other}, max_lag=5)
     assert isinstance(feats, pd.DataFrame)
     assert feats.shape[0] > 0
+

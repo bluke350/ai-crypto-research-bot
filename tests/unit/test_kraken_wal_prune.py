@@ -1,7 +1,7 @@
 import asyncio
 import os
 import shutil
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 import pytest
 import pandas as pd
@@ -16,7 +16,7 @@ async def test_wal_prune_removes_old_archives(tmp_path):
 
     client = KrakenWSClient(out_root=str(out))
     # create fake archive folder with an old day
-    archive_dir = os.path.join(str(out), "_wal", "archive", "XBT/USD", (datetime.utcnow() - timedelta(days=2)).strftime("%Y%m%d"))
+    archive_dir = os.path.join(str(out), "_wal", "archive", "XBT/USD", (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y%m%d"))
     os.makedirs(archive_dir, exist_ok=True)
     # create a dummy file in the archived day
     with open(os.path.join(archive_dir, "dummy.parquet"), "w") as f:

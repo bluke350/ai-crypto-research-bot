@@ -14,7 +14,7 @@ def test_checkpoint_trades_handles_parquet_write_failure(tmp_path, monkeypatch):
     client = KrakenWSClient(out_root=str(out))
 
     pair = "XBTUSD"
-    ts = int(pd.Timestamp.utcnow().timestamp())
+    ts = int(pd.Timestamp.now(tz="UTC").timestamp())
     msg = {"type": "trade", "pair": pair, "timestamp": ts, "price": 123.45, "size": 0.5, "seq": 10}
 
     # Force pq.write_table to raise an exception to simulate filesystem errors
@@ -35,9 +35,9 @@ def test_wal_flush_handles_write_errors(tmp_path, monkeypatch):
     client = KrakenWSClient(out_root=str(out))
     # populate wal buffer with an entry
     pair = "XBTUSD"
-    minute = pd.to_datetime(int(pd.Timestamp.utcnow().timestamp()), unit='s', utc=True).strftime('%Y%m%dT%H%M')
+    minute = pd.to_datetime(int(pd.Timestamp.now(tz="UTC").timestamp()), unit='s', utc=True).strftime('%Y%m%dT%H%M')
     key = (pair, minute)
-    client._wal_buffer[key] = [{"timestamp": pd.to_datetime(pd.Timestamp.utcnow()), "price": 100.0, "size": 1.0}]
+    client._wal_buffer[key] = [{"timestamp": pd.to_datetime(pd.Timestamp.now(tz="UTC")), "price": 100.0, "size": 1.0}]
 
     # monkeypatch pq.write_table to raise
     def fake_write_table(table, path):
@@ -56,7 +56,7 @@ def test_compress_archived_wal_handles_errors(tmp_path, monkeypatch):
     os.environ['WS_WAL_COMPRESS_DAYS'] = '0'
     client = KrakenWSClient(out_root=str(out))
     # create nested archive day dir
-    archive_dir = os.path.join(str(out), '_wal', 'archive', 'XBTUSD', (pd.Timestamp.utcnow() - pd.Timedelta(days=2)).strftime('%Y%m%d'))
+    archive_dir = os.path.join(str(out), '_wal', 'archive', 'XBTUSD', (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=2)).strftime('%Y%m%d'))
     os.makedirs(archive_dir, exist_ok=True)
     with open(os.path.join(archive_dir, 'dummy.parquet'), 'w') as fh:
         fh.write('x')
@@ -79,7 +79,7 @@ def test_prune_archived_wal_handles_errors(tmp_path, monkeypatch):
     out = tmp_path / 'data'
     os.environ['WS_WAL_RETENTION_DAYS'] = '0'
     client = KrakenWSClient(out_root=str(out))
-    archive_dir = os.path.join(str(out), '_wal', 'archive', 'XBTUSD', (pd.Timestamp.utcnow() - pd.Timedelta(days=5)).strftime('%Y%m%d'))
+    archive_dir = os.path.join(str(out), '_wal', 'archive', 'XBTUSD', (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=5)).strftime('%Y%m%d'))
     os.makedirs(archive_dir, exist_ok=True)
     # create a tar to prune
     tar_path = archive_dir + '.tar.gz'
@@ -103,7 +103,7 @@ import pytest
 import pandas as pd
 import pyarrow.parquet as pq
 import pyarrow as pa
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from src.ingestion.providers.kraken_ws import KrakenWSClient
 
@@ -113,7 +113,7 @@ def test_checkpoint_trades_handles_parquet_write_failure(tmp_path, monkeypatch):
     client = KrakenWSClient(out_root=str(out))
 
     pair = "XBTUSD"
-    ts = int(pd.Timestamp.utcnow().timestamp())
+    ts = int(pd.Timestamp.now(tz="UTC").timestamp())
     msg = {"type": "trade", "pair": pair, "timestamp": ts, "price": 123.45, "size": 0.5, "seq": 10}
 
     # patch pq.write_table to raise
@@ -135,9 +135,9 @@ def test_wal_flush_loop_handles_write_failure(tmp_path, monkeypatch):
     out = tmp_path / "data"
     client = KrakenWSClient(out_root=str(out))
     pair = "XBTUSD"
-    minute = pd.to_datetime(int(pd.Timestamp.utcnow().timestamp()), unit='s', utc=True).strftime("%Y%m%dT%H%M")
+    minute = pd.to_datetime(int(pd.Timestamp.now(tz="UTC").timestamp()), unit='s', utc=True).strftime("%Y%m%dT%H%M")
     key = (pair, minute)
-    client._wal_buffer[key] = [{"timestamp": pd.to_datetime(pd.Timestamp.utcnow()), "price": 100.0, "size": 1.0}]
+    client._wal_buffer[key] = [{"timestamp": pd.to_datetime(pd.Timestamp.now(tz="UTC")), "price": 100.0, "size": 1.0}]
 
     # patch pq.write_table to raise during flush
     def fake_write_table(table, dest):
@@ -168,7 +168,7 @@ def test_compress_archived_wal_handles_make_archive_failure(tmp_path, monkeypatc
     client = KrakenWSClient(out_root=str(out))
 
     # prepare archive dir older than compress threshold
-    old_date = (datetime.utcnow() - timedelta(days=10)).strftime("%Y%m%d")
+    old_date = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y%m%d")
     archive_dir = os.path.join(str(out), '_wal', 'archive', 'XBTUSD', old_date)
     os.makedirs(archive_dir, exist_ok=True)
     with open(os.path.join(archive_dir, 'dummy.parquet'), 'w') as f:
@@ -192,7 +192,7 @@ def test_prune_archived_wal_handles_delete_failure(tmp_path, monkeypatch):
     client = KrakenWSClient(out_root=str(out))
 
     # add archive file older than retention
-    old_date = (datetime.utcnow() - timedelta(days=10)).strftime("%Y%m%d")
+    old_date = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y%m%d")
     archive_dir = os.path.join(str(out), '_wal', 'archive', 'XBTUSD', old_date)
     os.makedirs(archive_dir, exist_ok=True)
     fname = os.path.join(archive_dir, 'dummy.parquet')
@@ -221,7 +221,7 @@ def test_recover_wal_handles_corrupt_parquet(tmp_path):
     client = KrakenWSClient(out_root=str(out))
 
     pair = "XBTUSD"
-    day = datetime.utcnow().strftime("%Y%m%d")
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
     wal_dir = os.path.join(client.wal_folder, pair, day)
     os.makedirs(wal_dir, exist_ok=True)
 

@@ -48,7 +48,7 @@ async def test_start_connect_and_consume_writes_parquet_and_wal(tmp_path, monkey
     # set a short WAL flush interval so we see files quickly
     client._wal_flush_interval = 0.05
 
-    now = int(pd.Timestamp.utcnow().timestamp())
+    now = int(pd.Timestamp.now(tz="UTC").timestamp())
     # craft raw JSON messages as the WS yields
     msg1 = json.dumps({"type": "trade", "pair": "XBT/USD", "timestamp": now, "price": "40000", "size": "0.001", "seq": 1})
     msg2 = json.dumps({"type": "trade", "pair": "XBT/USD", "timestamp": now + 60, "price": "40010", "size": "0.002", "seq": 2})

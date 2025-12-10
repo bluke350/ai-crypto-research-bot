@@ -12,7 +12,8 @@ import time
 import websockets
 import random
 import shutil
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from src.utils.time import now_utc, from_timestamp
 
 from src.ingestion.providers import kraken_rest
 import threading
@@ -349,7 +350,7 @@ class KrakenWSClient:
                     # update metrics
                     try:
                         if self.last_processed_ts and msg.get("type") == "trade" and msg.get("timestamp"):
-                            self.last_processed_ts.set(int(float(msg.get("timestamp"))))
+                                        self.last_processed_ts.set(int(float(msg.get("timestamp"))))
                     except Exception:
                         pass
                 # In test mode, avoid reconnecting repeatedly — allow a single
@@ -583,10 +584,10 @@ class KrakenWSClient:
         try:
             if since_ts is None:
                 # no anchor; pick a recent window (last 5 minutes)
-                since = int((pd.Timestamp.utcnow() - pd.Timedelta(minutes=5)).timestamp())
+                since = int((pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=5)).timestamp())
             else:
                 since = max(0, int(since_ts) - 60)
-            end = int(pd.Timestamp.utcnow().timestamp())
+            end = int(pd.Timestamp.now(tz="UTC").timestamp())
             logger.info("resyncing trades for %s from %s to %s", pair, since, end)
             # Call REST trade-level endpoint (tests will patch this)
             trades = kraken_rest.get_trades(pair, since, end)
@@ -756,32 +757,44 @@ class KrakenWSClient:
     def prune_archived_wal_once(self):
         """Synchronous helper: prune archived WAL day directories and compressed archives older than retention."""
         try:
-            cutoff = datetime.utcnow() - timedelta(days=self._wal_retention_days)
+            cutoff = now_utc() - timedelta(days=self._wal_retention_days)
             archive_root = os.path.join(self.wal_folder, "archive")
             if os.path.exists(archive_root):
                 for root, dirs, files in os.walk(archive_root):
-                    # prune day directories named YYYYMMDD
-                    for d in list(dirs):
-                        if len(d) == 8 and d.isdigit():
-                            day_dir = os.path.join(root, d)
+                    # If the current root itself is a day directory (basename YYYYMMDD), handle it.
+                    base = os.path.basename(root)
+                    if len(base) == 8 and base.isdigit():
+                        day_dir = root
+                        try:
+                            day_dt = datetime.strptime(base, "%Y%m%d").replace(tzinfo=timezone.utc)
+                        except Exception:
+                            day_dt = None
+                        # debug: log comparison values when pruning
+                        logger.debug("prune check: day=%s day_dt=%s cutoff=%s (root=%s)", base, day_dt, cutoff, root)
+                        try:
+                            print(f"PRUNE_CHECK day={base} day_dt={day_dt} cutoff={cutoff} root={root}")
+                        except Exception:
+                            pass
+                        if day_dt is not None and day_dt < cutoff:
                             try:
-                                day_dt = datetime.strptime(d, "%Y%m%d")
+                                shutil.rmtree(day_dir)
+                                logger.info("pruned archived wal day %s (root=%s)", base, root)
                             except Exception:
-                                continue
-                            if day_dt < cutoff:
-                                try:
-                                    shutil.rmtree(day_dir)
-                                    logger.info("pruned archived wal day %s (root=%s)", d, root)
-                                except Exception:
-                                    logger.exception("failed to prune archived wal %s", day_dir)
-                    # also prune compressed archives older than cutoff
+                                logger.exception("failed to prune archived wal %s", day_dir)
+                    # also prune compressed archives older than cutoff (files may sit alongside day dirs)
                     for f in list(files):
                         if f.endswith('.tar.gz'):
                             p = os.path.join(root, f)
                             try:
-                                mtime = datetime.utcfromtimestamp(os.path.getmtime(p))
+                                mtime = datetime.fromtimestamp(os.path.getmtime(p), timezone.utc)
                             except Exception:
                                 continue
+                            # debug: log mtime comparison when pruning archives
+                            logger.debug("prune archive check: path=%s mtime=%s cutoff=%s", p, mtime, cutoff)
+                            try:
+                                print(f"PRUNE_ARCHIVE_CHECK path={p} mtime={mtime} cutoff={cutoff}")
+                            except Exception:
+                                pass
                             if mtime < cutoff:
                                 try:
                                     os.remove(p)
@@ -806,34 +819,45 @@ class KrakenWSClient:
     def compress_archived_wal_once(self):
         """Synchronous helper: compress archived WAL day directories older than configured days."""
         try:
-            cutoff = datetime.utcnow() - timedelta(days=self._wal_compress_after_days)
+            cutoff = now_utc() - timedelta(days=self._wal_compress_after_days)
             archive_root = os.path.join(self.wal_folder, "archive")
+            try:
+                print(f"COMPRESS_RUN archive_root={archive_root} exists={os.path.exists(archive_root)} compress_after_days={self._wal_compress_after_days}")
+            except Exception:
+                pass
             if os.path.exists(archive_root):
                 for root, dirs, files in os.walk(archive_root):
-                    for d in list(dirs):
-                        if len(d) == 8 and d.isdigit():
-                            day_dir = os.path.join(root, d)
-                            try:
-                                day_dt = datetime.strptime(d, "%Y%m%d")
-                            except Exception:
-                                continue
-                            if day_dt < cutoff:
-                                tar_path = day_dir + ".tar.gz"
-                                # avoid compressing if tar already exists
-                                if os.path.exists(tar_path):
-                                    # remove original dir if present
-                                    try:
-                                        shutil.rmtree(day_dir)
-                                    except Exception:
-                                        logger.exception("failed to remove already-compressed dir %s", day_dir)
-                                    continue
+                    # If the current root is a day directory (basename YYYYMMDD), handle it directly.
+                    base = os.path.basename(root)
+                    if len(base) == 8 and base.isdigit():
+                        day_dir = root
+                        try:
+                            day_dt = datetime.strptime(base, "%Y%m%d").replace(tzinfo=timezone.utc)
+                        except Exception:
+                            day_dt = None
+                        # debug: log comparison values for compression
+                        logger.debug("compress check: day=%s day_dt=%s cutoff=%s (root=%s)", base, day_dt, cutoff, root)
+                        try:
+                            print(f"COMPRESS_CHECK day={base} day_dt={day_dt} cutoff={cutoff} root={root}")
+                        except Exception:
+                            pass
+                        if day_dt is not None and day_dt < cutoff:
+                            tar_path = day_dir + ".tar.gz"
+                            # avoid compressing if tar already exists
+                            if os.path.exists(tar_path):
+                                # remove original dir if present
                                 try:
-                                    shutil.make_archive(day_dir, 'gztar', root_dir=day_dir)
-                                    # remove original directory after successful compression
                                     shutil.rmtree(day_dir)
-                                    logger.info("compressed archived wal day %s to %s", day_dir, tar_path)
                                 except Exception:
-                                    logger.exception("failed to compress archived wal %s", day_dir)
+                                    logger.exception("failed to remove already-compressed dir %s", day_dir)
+                                continue
+                            try:
+                                shutil.make_archive(day_dir, 'gztar', root_dir=day_dir)
+                                # remove original directory after successful compression
+                                shutil.rmtree(day_dir)
+                                logger.info("compressed archived wal day %s to %s", day_dir, tar_path)
+                            except Exception:
+                                logger.exception("failed to compress archived wal %s", day_dir)
         except Exception:
             logger.exception("compress_archived_wal_once error")
 

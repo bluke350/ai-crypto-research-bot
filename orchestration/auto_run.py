@@ -11,7 +11,7 @@ import numpy as np
 import os
 import shutil
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -325,9 +325,11 @@ def main():
     except Exception:
         avg_step = None
 
+    from src.utils.time import now_iso, now_utc
+
     summary = {
         "run_id": run_id,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": now_iso(),
         "max_drawdown": max_dd,
         "n_executions": n_exec,
         "sharpe": sharpe,
@@ -347,7 +349,7 @@ def main():
 
     # write repro.json for deterministic replay
     try:
-        repro = {"run_id": run_id, "created_at": datetime.utcnow().isoformat(), "args": vars(args), "sim_seed": args.sim_seed}
+        repro = {"run_id": run_id, "created_at": now_iso(), "args": vars(args), "sim_seed": args.sim_seed}
         with open(os.path.join(out_dir, "repro.json"), "w", encoding="utf-8") as rf:
             json.dump(repro, rf, indent=2)
     except Exception:
@@ -377,11 +379,11 @@ def main():
         pass
 
     if decision.get("approved") and args.auto_deploy and passed:
-        deploy_dir = os.path.join("deploy", "paper", datetime.utcnow().strftime("%Y%m%dT%H%M%S"))
+        deploy_dir = os.path.join("deploy", "paper", now_utc().strftime("%Y%m%dT%H%M%S"))
         os.makedirs(deploy_dir, exist_ok=True)
         shutil.copy(ckpt_path, os.path.join(deploy_dir, "model.pkl"))
         with open(os.path.join(deploy_dir, "deployed.meta.json"), "w", encoding="utf-8") as fh:
-            json.dump({"run_id": run_id, "deployed_at": datetime.utcnow().isoformat(), "source": os.path.abspath(ckpt_path), "decision": decision}, fh)
+            json.dump({"run_id": run_id, "deployed_at": now_iso(), "source": os.path.abspath(ckpt_path), "decision": decision}, fh)
         print("Deployed model to", deploy_dir)
     else:
         print("Not deploying — decision approved:", decision.get("approved"), "passed:", passed)

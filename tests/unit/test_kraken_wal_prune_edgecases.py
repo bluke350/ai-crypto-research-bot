@@ -1,7 +1,7 @@
 import asyncio
 import os
 import shutil
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytest
 import pandas as pd
 from src.ingestion.providers.kraken_ws import KrakenWSClient
@@ -42,13 +42,13 @@ async def test_wal_prune_respects_retention(tmp_path):
     client = KrakenWSClient(out_root=str(out))
     archive_root = os.path.join(str(out), "_wal", "archive", "XBT/USD")
     # old day (2 days ago)
-    old_day = (datetime.utcnow() - timedelta(days=2)).strftime("%Y%m%d")
+    old_day = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y%m%d")
     old_dir = os.path.join(archive_root, old_day)
     os.makedirs(old_dir, exist_ok=True)
     with open(os.path.join(old_dir, "old.parquet"), "w") as f:
         f.write("old")
     # recent day (today)
-    recent_day = datetime.utcnow().strftime("%Y%m%d")
+    recent_day = datetime.now(timezone.utc).strftime("%Y%m%d")
     recent_dir = os.path.join(archive_root, recent_day)
     os.makedirs(recent_dir, exist_ok=True)
     with open(os.path.join(recent_dir, "new.parquet"), "w") as f:

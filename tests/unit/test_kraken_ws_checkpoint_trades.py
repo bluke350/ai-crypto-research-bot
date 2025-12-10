@@ -12,7 +12,7 @@ def test_checkpoint_trades_writes_minute_parquet_and_buffers_wal(tmp_path):
 
     pair = "XBTUSD"
     # create a timestamp in seconds
-    ts = int(pd.Timestamp.utcnow().timestamp())
+    ts = int(pd.Timestamp.now(tz="UTC").timestamp())
     msg = {"type": "trade", "pair": pair, "timestamp": ts, "price": 123.45, "size": 0.5, "seq": 10}
 
     # run checkpoint coroutine
