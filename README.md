@@ -30,6 +30,20 @@ tooling\run_setup.ps1
 tooling\run_tests.ps1
 ```
 
+## Developer setup: pre-commit (recommended)
+
+We use a small pre-commit hook to prevent naive UTC usages (e.g. `datetime.utcnow()`)
+from being committed. To enable it locally:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+The repository includes a local hook that runs `scripts/check_naive_utc.py` on staged
+Python files. CI also runs the same check on pull requests (see `.github/workflows/utc_check.yml`).
+
+
 ## Chat recovery & preventive tips
 
 If you use an assistant extension (for example GitHub Copilot Chat) inside VS Code, conversations are often stored per VS Code window or per workspace. If you open a different folder or workspace the assistant may show a different (or empty) chat history.
