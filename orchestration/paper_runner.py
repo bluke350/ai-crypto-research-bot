@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import timezone
+from src.utils.time import now_iso
 from pathlib import Path
 from typing import Optional
 
@@ -100,7 +101,7 @@ def run_paper(checkpoint_path: str,
     with open(out_dir / 'result.json', 'w', encoding='utf-8') as fh:
         json.dump(serial, fh, indent=2)
 
-    summary = {'run_id': run_id, 'created_at': datetime.utcnow().isoformat(), 'n_executions': len(serial.get('executions', []))}
+    summary = {'run_id': run_id, 'created_at': now_iso(), 'n_executions': len(serial.get('executions', []))}
     with open(out_dir / 'summary.json', 'w', encoding='utf-8') as fh:
         json.dump(summary, fh, indent=2)
 

@@ -3,7 +3,7 @@ import os
 import shutil
 import tarfile
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pyarrow as pa
@@ -38,7 +38,7 @@ def test_checkpoint_trades_and_flush(tmp_path, monkeypatch):
     msg = {
         "type": "trade",
         "pair": "XBTUSD",
-        "timestamp": int(datetime.utcnow().timestamp()),
+        "timestamp": int(datetime.now(timezone.utc).timestamp()),
         "price": "30000",
         "size": "0.1",
         "seq": 1,
@@ -77,7 +77,7 @@ def test_compress_and_prune_archived_wal(tmp_path, monkeypatch):
     client = KrakenWSClient(out_root=str(out))
 
     archive = out / "_wal" / "archive" / "XBTUSD"
-    day = (datetime.utcnow() - timedelta(days=10)).strftime("%Y%m%d")
+    day = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y%m%d")
     day_dir = archive / day
     os.makedirs(day_dir, exist_ok=True)
     # place a dummy file
@@ -98,7 +98,7 @@ def test_compress_and_prune_archived_wal(tmp_path, monkeypatch):
     # set retention to 0 so prune should remove the archive
     client._wal_retention_days = 0
     # ensure mtime on tar is old
-    old_ts = (datetime.utcnow() - timedelta(days=10)).timestamp()
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=10)).timestamp()
     os.utime(tar_path, (old_ts, old_ts))
 
     client.prune_archived_wal_once()

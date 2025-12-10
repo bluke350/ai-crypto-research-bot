@@ -4,7 +4,8 @@ import json
 import os
 import time
 import uuid
-from datetime import datetime
+from datetime import timezone
+from src.utils.time import now_iso, now_utc
 from pathlib import Path
 from typing import Optional
 
@@ -137,7 +138,7 @@ def run_live(checkpoint_path: str,
     # write run plan / reproducibility snapshot
     run_plan = {
         "run_id": run_id,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": now_iso(),
         "checkpoint_path": checkpoint_path,
         "pair": pair,
         "sim_seed": sim_seed,
@@ -752,7 +753,7 @@ def run_live(checkpoint_path: str,
     with open(out_dir / 'result.json', 'w', encoding='utf-8') as fh:
         json.dump(serial, fh, indent=2)
 
-    summary = {'run_id': run_id, 'created_at': datetime.utcnow().isoformat(), 'n_executions': len(serial.get('executions', []))}
+    summary = {'run_id': run_id, 'created_at': now_iso(), 'n_executions': len(serial.get('executions', []))}
     with open(out_dir / 'summary.json', 'w', encoding='utf-8') as fh:
         json.dump(summary, fh, indent=2)
 

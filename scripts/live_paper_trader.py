@@ -26,7 +26,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime
+from src.utils.time import now_iso, now_utc
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -222,7 +222,7 @@ def run_inprocess_trader(pair: str, ckpt: str, cash: float, poll_interval: float
                 # no live message, sleep briefly
                 time.sleep(poll_interval)
                 continue
-            ts = ts_val or datetime.utcnow().isoformat()
+            ts = ts_val or now_iso()
             price = price_val
         else:
             if i >= len(ticks):
@@ -392,7 +392,7 @@ def run_inprocess_trader(pair: str, ckpt: str, cash: float, poll_interval: float
         # snapshot
         cur = conn.cursor()
         est_value = cash_local + position * price
-        cur.execute('INSERT INTO snapshots (run_id, pair, ts, cash, position, est_value) VALUES (?,?,?,?,?,?)', (broker.run_id, pair, datetime.utcnow().isoformat(), cash_local, position, est_value))
+        cur.execute('INSERT INTO snapshots (run_id, pair, ts, cash, position, est_value) VALUES (?,?,?,?,?,?)', (broker.run_id, pair, now_iso(), cash_local, position, est_value))
         conn.commit()
 
         # export a summary CSV for dashboards
@@ -428,7 +428,7 @@ def spawn_runner(pair: str, cash: float, max_notional: float, extra_args: Option
     # redirect stdout/stderr to log file per pair
     log_dir = Path('experiments') / 'live_logs'
     log_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.utcnow().strftime('%Y%m%dT%H%M%S')
+    ts = now_utc().strftime('%Y%m%dT%H%M%S')
     log_path = log_dir / f'{pair.replace("/", "_")}-{ts}.log'
     fh = open(log_path, 'a', buffering=1)
     p = subprocess.Popen(cmd, stdout=fh, stderr=fh)
@@ -538,7 +538,7 @@ def snapshot_run_state(run_dir: Path, conn: sqlite3.Connection, initial_cash: fl
             position -= filled_size
         last_price = avg_fill_price if avg_fill_price else last_price
     est_value = cash + (position * (last_price or 0.0))
-    ts = datetime.utcnow().isoformat()
+    ts = now_iso()
     cur.execute('INSERT INTO snapshots (run_id, pair, ts, cash, position, est_value) VALUES (?,?,?,?,?,?)', (run_id, pair, ts, cash, position, est_value))
     conn.commit()
     return {'run_id': run_id, 'pair': pair, 'cash': cash, 'position': position, 'est_value': est_value}

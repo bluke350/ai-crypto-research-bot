@@ -27,7 +27,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime
+from src.utils.time import now_iso
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,7 +72,7 @@ def check_thresholds(metrics: dict, min_pnl: float, min_sharpe: float, max_dd: f
 
 def perform_rollback(note: str = ''):
     # In production this should swap model pointers or call infra APIs.
-    t = datetime.utcnow().isoformat()
+    t = now_iso()
     print(f"Rollback triggered at {t}: {note}")
     # emit placeholder for infra action
     print("ACTION: rollback model routing (user must implement actual call)")

@@ -1,7 +1,7 @@
 import asyncio
 import os
 import shutil
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytest
 import pandas as pd
 from src.ingestion.providers.kraken_ws import KrakenWSClient
@@ -13,7 +13,7 @@ def test_compress_archived_wal_handles_make_archive_failure(tmp_path, monkeypatc
     os.environ["WS_WAL_COMPRESS_INTERVAL_HOURS"] = "0.001"
 
     client = KrakenWSClient(out_root=str(out))
-    archive_dir = os.path.join(str(out), "_wal", "archive", "XBT/USD", (datetime.utcnow() - timedelta(days=2)).strftime("%Y%m%d"))
+    archive_dir = os.path.join(str(out), "_wal", "archive", "XBT/USD", (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y%m%d"))
     os.makedirs(archive_dir, exist_ok=True)
     with open(os.path.join(archive_dir, "dummy.parquet"), "w") as f:
         f.write("x")
@@ -43,7 +43,7 @@ def test_prune_archived_wal_handles_rmtree_failure(tmp_path, monkeypatch):
 
     client = KrakenWSClient(out_root=str(out))
     archive_root = os.path.join(str(out), "_wal", "archive", "XBT/USD")
-    old_day = (datetime.utcnow() - timedelta(days=2)).strftime("%Y%m%d")
+    old_day = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y%m%d")
     old_dir = os.path.join(archive_root, old_day)
     os.makedirs(old_dir, exist_ok=True)
     with open(os.path.join(old_dir, "old.parquet"), "w") as f:

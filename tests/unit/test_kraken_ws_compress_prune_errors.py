@@ -1,7 +1,7 @@
 import os
 import shutil
 import tempfile
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
 import pytest
 
 from src.ingestion.providers.kraken_ws import KrakenWSClient
@@ -11,7 +11,7 @@ def test_compress_handles_failures(tmp_path, monkeypatch):
     out = tmp_path / "data"
     client = KrakenWSClient(out_root=str(out))
     # prepare an archive day older than compress threshold
-    old_day = (datetime.utcnow() - timedelta(days=10)).strftime('%Y%m%d')
+        old_day = (datetime.now(timezone.utc) - timedelta(days=10)).strftime('%Y%m%d')
     archive_dir = os.path.join(str(out), '_wal', 'archive', 'XBT/USD', old_day)
     os.makedirs(archive_dir, exist_ok=True)
     with open(os.path.join(archive_dir, 'a.parquet'), 'w') as fh:
@@ -38,7 +38,7 @@ def test_prune_handles_failures(tmp_path, monkeypatch):
     out = tmp_path / "data"
     client = KrakenWSClient(out_root=str(out))
     # create an old archive file
-    old_day = (datetime.utcnow() - timedelta(days=10)).strftime('%Y%m%d')
+        old_day = (datetime.now(timezone.utc) - timedelta(days=10)).strftime('%Y%m%d')
     archive_dir = os.path.join(str(out), '_wal', 'archive', 'XBT/USD', old_day)
     os.makedirs(archive_dir, exist_ok=True)
     fname = os.path.join(archive_dir, 'a.parquet')
@@ -70,7 +70,7 @@ def test_compress_archived_wal_handles_make_archive_failure(tmp_path, monkeypatc
     os.environ['WS_WAL_COMPRESS_DAYS'] = '0'
     client = KrakenWSClient(out_root=str(out))
     # create an old archived day dir
-    old_day = (datetime.utcnow() - timedelta(days=3)).strftime('%Y%m%d')
+        old_day = (datetime.now(timezone.utc) - timedelta(days=3)).strftime('%Y%m%d')
     archive_dir = os.path.join(str(out), '_wal', 'archive', 'XBTUSD', old_day)
     os.makedirs(archive_dir, exist_ok=True)
     with open(os.path.join(archive_dir, 'dummy.parquet'), 'w') as f:
@@ -95,7 +95,7 @@ def test_prune_archived_wal_handles_deletion_failure(tmp_path, monkeypatch):
     out = tmp_path / 'data'
     client = KrakenWSClient(out_root=str(out))
     # create an old archived day dir and a tar.gz file
-    old_day = (datetime.utcnow() - timedelta(days=3)).strftime('%Y%m%d')
+        old_day = (datetime.now(timezone.utc) - timedelta(days=3)).strftime('%Y%m%d')
     archive_root = os.path.join(str(out), '_wal', 'archive', 'XBTUSD')
     day_dir = os.path.join(archive_root, old_day)
     os.makedirs(day_dir, exist_ok=True)

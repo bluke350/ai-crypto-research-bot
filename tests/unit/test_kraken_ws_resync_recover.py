@@ -1,6 +1,6 @@
 import asyncio
 import os
-from datetime import datetime
+from src.utils.time import now_utc
 
 import pandas as pd
 import pyarrow as pa
@@ -21,7 +21,7 @@ def test_handle_message_triggers_resync_and_writes(tmp_path, monkeypatch):
     client._last_seq[pair] = 1
 
     # prepare fake trades DataFrame returned by kraken_rest.get_trades
-    ts = pd.to_datetime(datetime.utcnow()).tz_localize("UTC")
+    ts = pd.to_datetime(now_utc())
     trades = pd.DataFrame([{"timestamp": ts, "price": 30000.0, "size": 0.1}])
 
     # patch the kraken_rest used by the kraken_ws module so `_resync_pair`
@@ -66,12 +66,13 @@ def test_recover_wal_enqueues_messages_and_moves_to_archive(tmp_path):
     client = KrakenWSClient(out_root=str(out))
 
     pair = "XBTUSD"
-    day = datetime.utcnow().strftime("%Y%m%d")
+    day = now_utc().strftime("%Y%m%d")
+    day = now_utc().strftime("%Y%m%d")
     wal_dir = os.path.join(client.wal_folder, pair, day)
     os.makedirs(wal_dir, exist_ok=True)
 
     # write a small parquet file with timestamp/price/size
-    df = pd.DataFrame([{"timestamp": pd.to_datetime(datetime.utcnow()), "price": 30000.0, "size": 0.1}])
+    df = pd.DataFrame([{"timestamp": pd.to_datetime(now_utc()), "price": 30000.0, "size": 0.1}])
     path = os.path.join(wal_dir, "sample.parquet")
     pq.write_table(pa.Table.from_pandas(df), path)
 

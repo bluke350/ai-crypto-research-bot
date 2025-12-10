@@ -13,7 +13,7 @@ def test_checkpoint_trades_parquet_write_failure(tmp_path, monkeypatch):
     out = tmp_path / "data"
     client = KrakenWSClient(out_root=str(out))
     pair = "XBTUSD"
-    ts = int(pd.Timestamp.utcnow().timestamp())
+    ts = int(pd.Timestamp.now(tz="UTC").timestamp())
     msg = {"type": "trade", "pair": pair, "timestamp": ts, "price": 123.45, "size": 0.5, "seq": 10}
 
     # monkeypatch pq.write_table to raise an IOError to simulate disk/write failure

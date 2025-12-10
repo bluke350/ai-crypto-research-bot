@@ -183,11 +183,11 @@ class PPOTrainer:
         # write small metadata file next to checkpoint to allow auto-detection
         try:
             import json
-            from datetime import datetime
+            from src.utils.time import now_iso
 
             meta = {
                 "checkpoint": os.path.abspath(path),
-                "created_at": datetime.utcnow().isoformat() + 'Z',
+                "created_at": now_iso() + 'Z',
                 "obs_dim": int(getattr(self, 'obs_dim', -1)),
                 "act_dim": int(getattr(self, 'act_dim', -1)),
                 "cfg": {k: getattr(self.cfg, k) for k in self.cfg.__dict__ if not k.startswith('_')},

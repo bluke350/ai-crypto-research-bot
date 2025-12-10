@@ -1,7 +1,7 @@
 import asyncio
 import os
 import tarfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytest
 from src.ingestion.providers.kraken_ws import KrakenWSClient
 
@@ -20,12 +20,12 @@ async def test_wal_archive_prune_removes_old_tarballs(tmp_path):
     # create a tarball with old mtime
     archive_root = os.path.join(str(out), "_wal", "archive", "XBT/USD")
     os.makedirs(archive_root, exist_ok=True)
-    day = (datetime.utcnow() - timedelta(days=2)).strftime("%Y%m%d")
+    day = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y%m%d")
     tar_path = os.path.join(archive_root, day + ".tar.gz")
     with open(tar_path, "wb") as f:
         f.write(b"x")
     # set mtime to old
-    old_ts = (datetime.utcnow() - timedelta(days=2)).timestamp()
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=2)).timestamp()
     os.utime(tar_path, (old_ts, old_ts))
 
     await client.start()

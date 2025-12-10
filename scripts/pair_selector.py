@@ -19,6 +19,7 @@ from typing import Dict, List
 
 import numpy as np
 import pandas as pd
+from src.utils.time import now_utc
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_RAW = ROOT / "data" / "raw"
@@ -124,7 +125,7 @@ def main(argv=None) -> int:
             logger.debug("Skipping %s: %s", pair, e)
 
     ranked = sorted(scored, key=lambda x: x.get("score", 0.0), reverse=True)
-    out = {"created_at": pd.Timestamp.utcnow().isoformat(), "candidates": ranked[: args.top_k]}
+    out = {"created_at": now_utc().isoformat(), "candidates": ranked[: args.top_k]}
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out, indent=2))
@@ -167,7 +168,7 @@ def main(argv=None) -> int:
 
             ranked = ml_rank_universe(prices, predictor=predictor, anomaly_detector=detector)[: args.top_k]
             scored = [{'pair': s, 'score': float(score), 'is_normal': bool(ok)} for s, score, ok in ranked]
-            out = {"created_at": pd.Timestamp.utcnow().isoformat(), "candidates": scored}
+            out = {"created_at": now_utc().isoformat(), "candidates": scored}
             out_path = Path(args.out)
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(out, indent=2))
@@ -189,7 +190,7 @@ def main(argv=None) -> int:
             logger.debug("Skipping %s: %s", pair, e)
 
     ranked = sorted(scored, key=lambda x: x.get("score", 0.0), reverse=True)
-    out = {"created_at": pd.Timestamp.utcnow().isoformat(), "candidates": ranked[: args.top_k]}
+    out = {"created_at": now_utc().isoformat(), "candidates": ranked[: args.top_k]}
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out, indent=2))

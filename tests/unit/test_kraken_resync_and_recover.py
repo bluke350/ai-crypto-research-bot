@@ -1,7 +1,7 @@
 import asyncio
 import os
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pyarrow as pa
@@ -17,7 +17,7 @@ async def test_resync_pair_writes_minute_and_wal(tmp_path, monkeypatch):
     client = KrakenWSClient(out_root=out_root)
 
     pair = "XBTUSD"
-    now = pd.Timestamp.utcnow().floor('s')
+    now = pd.Timestamp.now(tz="UTC").floor('s')
     # build fake trades DataFrame spanning two minutes
     rows = []
     for i in range(4):
@@ -70,7 +70,7 @@ async def test_recover_wal_requeues_and_archives(tmp_path):
     client = KrakenWSClient(out_root=out_root)
     # create a wal parquet under client.wal_folder
     pair = 'XBTUSD'
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     p = _make_wal_parquet(client.wal_folder, pair, now)
 
     # ensure file exists

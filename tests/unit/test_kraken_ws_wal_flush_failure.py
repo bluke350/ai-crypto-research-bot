@@ -11,10 +11,10 @@ def test_wal_flush_handles_parquet_write_error(monkeypatch, tmp_path):
     out = tmp_path / "data"
     client = KrakenWSClient(out_root=str(out))
     pair = "XBTUSD"
-    ts = int(pd.Timestamp.utcnow().timestamp())
+    ts = int(pd.Timestamp.now(tz="UTC").timestamp())
     minute_str = pd.to_datetime(ts, unit='s', utc=True).strftime("%Y%m%dT%H%M")
     key = (pair, minute_str)
-    client._wal_buffer[key] = [{"timestamp": pd.to_datetime(pd.Timestamp.utcnow()), "price": 100.0, "size": 1.0}]
+    client._wal_buffer[key] = [{"timestamp": pd.to_datetime(pd.Timestamp.now(tz="UTC")), "price": 100.0, "size": 1.0}]
 
     # make pq.write_table raise on attempt to flush wal
     def fake_write_table(table, path):
@@ -30,13 +30,6 @@ def test_wal_flush_handles_parquet_write_error(monkeypatch, tmp_path):
     wal_root = os.path.join(str(out), '_wal')
     # flush attempted, ensure archive not accidentally created
     assert os.path.exists(wal_root)
-import asyncio
-import os
-import pandas as pd
-import pytest
-import pyarrow.parquet as pq
-
-from src.ingestion.providers.kraken_ws import KrakenWSClient
 
 
 def test_wal_flush_handles_parquet_write_failure(tmp_path, monkeypatch):
@@ -45,7 +38,7 @@ def test_wal_flush_handles_parquet_write_failure(tmp_path, monkeypatch):
     client._wal_flush_interval = 0.05
 
     pair = "XBTUSD"
-    ts = int(pd.Timestamp.utcnow().timestamp())
+    ts = int(pd.Timestamp.now(tz="UTC").timestamp())
     minute_str = pd.to_datetime(ts, unit='s', utc=True).strftime("%Y%m%dT%H%M")
     key = (pair, minute_str)
     client._wal_buffer[key] = [{"timestamp": pd.to_datetime(ts, unit='s', utc=True), "price": 100.0, "size": 1.0}]

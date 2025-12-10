@@ -20,13 +20,13 @@ import os
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from src.utils.time import now_iso
 from pathlib import Path
 from typing import List, Dict, Optional
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return now_iso() + "Z"
 
 
 def run_job(cmd: str, logpath: str, timeout: Optional[int], retries: int) -> Dict:

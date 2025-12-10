@@ -1,7 +1,7 @@
 import asyncio
 import os
 import tarfile
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 import pytest
 from src.ingestion.providers.kraken_ws import KrakenWSClient
 
@@ -17,13 +17,15 @@ async def test_wal_archiver_creates_tar_and_removes_dir(tmp_path):
 
     client = KrakenWSClient(out_root=str(out))
     # create an archived day dir
-    archive_day = datetime.utcnow().strftime("%Y%m%d")
+    archive_day = datetime.now(timezone.utc).strftime("%Y%m%d")
     day_dir = os.path.join(str(out), "_wal", "archive", "XBT/USD", archive_day)
     os.makedirs(day_dir, exist_ok=True)
+    # create a dummy parquet file in the archived day dir
     with open(os.path.join(day_dir, "f.parquet"), "w") as f:
         f.write("x")
 
     await client.start()
+    # allow archiver loop to run once
     await asyncio.sleep(1.5)
     await client.stop()
 

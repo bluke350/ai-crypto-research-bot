@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import sys
-from datetime import datetime
+from src.utils.time import now_iso
 from typing import Optional
 
 from src.persistence.db import RunLogger
@@ -108,7 +108,7 @@ def promote(artifact_dir: str, models_dir: str, promotions_file: str, register: 
 
     # Record promotion in promotions file
     promo = {
-        "promoted_at": datetime.utcnow().isoformat(),
+        "promoted_at": now_iso(),
         "run_id": run_id,
         "artifact_dir": os.path.abspath(artifact_dir),
         "promoted_path": os.path.abspath(promoted_path),

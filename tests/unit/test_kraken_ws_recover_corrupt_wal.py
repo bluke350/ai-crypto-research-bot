@@ -2,7 +2,7 @@ import os
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from datetime import datetime
+from datetime import datetime, timezone
 import pytest
 
 from src.ingestion.providers.kraken_ws import KrakenWSClient
@@ -13,7 +13,7 @@ def test_recover_handles_corrupt_parquet(tmp_path, monkeypatch):
     client = KrakenWSClient(out_root=str(out))
 
     pair = 'XBTUSD'
-    day = datetime.utcnow().strftime('%Y%m%d')
+    day = datetime.now(timezone.utc).strftime('%Y%m%d')
     wal_dir = os.path.join(client.wal_folder, pair, day)
     os.makedirs(wal_dir, exist_ok=True)
 

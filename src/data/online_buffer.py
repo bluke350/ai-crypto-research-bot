@@ -21,7 +21,7 @@ def append_rows(df: pd.DataFrame, date: Optional[datetime.date] = None) -> Path:
     """
     ensure_buffer_dir()
     if date is None:
-        date = pd.Timestamp.utcnow().date()
+        date = pd.Timestamp.now(tz="UTC").date()
     path = BUFFER_DIR / f"{date.strftime('%Y%m%d')}.parquet"
     if path.exists():
         # append by reading and concatenating small dfs to preserve schema
@@ -43,7 +43,7 @@ def sample_recent(max_rows: int = 2000, lookback_days: int = 2) -> pd.DataFrame:
     if not files:
         return pd.DataFrame()
     # take recent files up to lookback_days
-    cutoff = pd.Timestamp.utcnow().date() - pd.Timedelta(days=lookback_days)
+    cutoff = pd.Timestamp.now(tz="UTC").date() - pd.Timedelta(days=lookback_days)
     recent = [p for p in files if pd.to_datetime(p.stem, format='%Y%m%d', errors='coerce').date() >= cutoff]
     if not recent:
         recent = files[-1:]

@@ -16,6 +16,7 @@ def _load_csvs(data_root: str):
     for p in paths:
         try:
             from src.utils.io import load_prices_csv
+
             df = load_prices_csv(p, dedupe='first')
             frames.append(df)
         except Exception:
@@ -165,9 +166,11 @@ def train_ml(data_root: str = "data/raw", save: str = "models/ml_baseline.pkl", 
         pass
 
     # metadata file with training params and a small provenance block
+    from src.utils.time import now_utc
+
     meta = {
         "checkpoint": os.path.abspath(save),
-        "created_at": pd.Timestamp.utcnow().isoformat(),
+        "created_at": now_utc().isoformat(),
         "train": {"data_root": data_root, "val_split": val_split, "steps": int(steps), "seed": int(seed), "patience": int(patience)},
         "features": best.get("features", {}),
         "metrics": best.get("metrics", {}),
